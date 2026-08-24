@@ -1,19 +1,22 @@
 // ==UserScript==
 // @name         艦これ Safari Safety
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      0.1.0
+// @version      0.1.1
 // @description  艦隊状態表示・大破警告・進撃3タップロック（Safari/Userscripts向け試作）
 // @match        *://*.dmm.com/*
+// @include      *://203.104.209.*/*
 // @include      /^https?:\/\/203\.104\.209\.\d+\//
 // @run-at       document-start
+// @inject-into  auto
 // @grant        none
 // ==/UserScript==
 
 (() => {
   'use strict';
 
-  const VERSION = '0.1.0';
+  const VERSION = '0.1.1';
   const API_EVENT = '__KCS_SAFETY_API__';
+  const FRAME_MESSAGE = '__KCS_SAFETY_FRAME_API__';
   // 1200x720ゲーム画面に対する進撃ボタン付近の初期推定位置。
   // 実機でずれる場合はこの4値を調整する。
   const GUARD = { x: 0.285, y: 0.585, w: 0.205, h: 0.17 };
@@ -35,6 +38,8 @@
     ui: null, guard: null,
     taps: [], audio: null,
     notification: false,
+    apiCount: 0,
+    lastApi: '',
   };
 
   const parse = (text) => {
@@ -48,13 +53,25 @@
   const deckIds = (a) => Array.isArray(a) ? a.filter(x => Number.isFinite(x) && x > 0) : [];
   const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+  function bootUi() {
+    if (window.top !== window.self) return;
+    const boot = () => { ensureUi(); render(); };
+    if (document.documentElement) boot();
+    else document.addEventListener('DOMContentLoaded', boot, { once: true });
+  }
+
   // 艦これ本体が通常どおり受信したAPIレスポンスを読むだけ。通信は変更しない。
   function installNetworkHook() {
     if (window.__KCS_SAFETY_HOOK__) return;
     window.__KCS_SAFETY_HOOK__ = true;
     const emit = (url, body, text) => {
       if (!String(url || '').includes('/kcsapi/')) return;
-      try { window.dispatchEvent(new CustomEvent(API_EVENT, { detail: { url: String(url), body: typeof body === 'string' ? body : '', text: String(text || '') } })); } catch (_) {}
+      const detail = { url: String(url), body: typeof body === 'string' ? body : '', text: String(text || '') };
+      try { window.dispatchEvent(new CustomEvent(API_EVENT, { detail })); } catch (_) {}
+      // 艦これ本体が子frameで動いている場合、DMM最上位frameのUIへ転送する。
+      try {
+        if (window.top !== window.self) window.top.postMessage({ [FRAME_MESSAGE]: detail }, '*');
+      } catch (_) {}
     };
     try {
       const open = XMLHttpRequest.prototype.open, send = XMLHttpRequest.prototype.send;
@@ -81,12 +98,21 @@
   }
 
   window.addEventListener(API_EVENT, e => onApi(e.detail));
+  if (window.top === window.self) {
+    window.addEventListener('message', e => {
+      const d = e?.data?.[FRAME_MESSAGE];
+      if (d && String(d.url || '').includes('/kcsapi/')) onApi(d);
+    });
+  }
   installNetworkHook();
+  bootUi();
 
   function onApi(d) {
     const j = parse(d?.text);
     if (!j || j.api_result !== 1) return;
     const p = pathOf(d.url), data = j.api_data;
+    S.apiCount++;
+    S.lastApi = p.split('/').pop() || p;
     ensureUi();
     try {
       if (p.includes('/api_start2/getData')) {
@@ -209,11 +235,11 @@
   }
 
   function ensureUi() {
-    if (S.ui || !document.documentElement) return;
+    if (window.top !== window.self || S.ui || !document.documentElement) return;
     const host = document.createElement('div'); host.id = '__kcs_safety_ui';
     host.style.cssText = 'position:fixed;z-index:2147483645;right:8px;top:8px;font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif';
     const root = host.attachShadow({mode:'open'});
-    root.innerHTML = `<style>*{box-sizing:border-box}button{font:inherit}.chip{border:0;border-radius:999px;background:#17191f;color:#fff;padding:8px 12px;font-weight:800}.p{display:none;position:fixed;right:8px;top:48px;width:min(94vw,560px);max-height:80vh;overflow:auto;background:#15171def;color:#fff;border:1px solid #ffffff33;border-radius:14px;padding:12px;box-shadow:0 10px 30px #0009;font-size:12px}.p.open{display:block}.top{display:flex;gap:8px;align-items:center}.top b{flex:1;font-size:15px}.btn{border:1px solid #ffffff33;border-radius:8px;background:#2a2d36;color:#fff;padding:6px 9px}.tabs{display:flex;gap:6px;margin:8px 0}.tabs .on{background:#fff;color:#111}.note{padding:8px;border-radius:8px;background:#272a33;margin:7px 0;line-height:1.45}.red{background:#641726;border:1px solid #ff7484}.yellow{background:#584515;border:1px solid #e3b840}table{width:100%;border-collapse:collapse;font-size:11px}th,td{padding:6px 4px;border-bottom:1px solid #ffffff18;text-align:left;white-space:nowrap}tr.danger{background:#651729}tr.warn{background:#554313}tr.unknown{background:#463e55}.muted{opacity:.62}.name{max-width:130px;overflow:hidden;text-overflow:ellipsis}</style><button class="chip" id="chip">⚓ 状態</button><section class="p" id="panel"><div class="top"><b>⚓ 艦隊状態 v${VERSION}</b><button class="btn" id="notify">通知テスト</button><button class="btn" id="close">閉じる</button></div><div id="summary"></div><div class="tabs"><button class="btn on" id="f1">第1/出撃</button><button class="btn" id="f2">第2艦隊</button></div><div id="fleet"></div><div id="planes"></div></section>`;
+    root.innerHTML = `<style>*{box-sizing:border-box}button{font:inherit}.chip{border:0;border-radius:999px;background:#5b4c14;color:#fff;padding:8px 12px;font-weight:800}.p{display:none;position:fixed;right:8px;top:48px;width:min(94vw,560px);max-height:80vh;overflow:auto;background:#15171def;color:#fff;border:1px solid #ffffff33;border-radius:14px;padding:12px;box-shadow:0 10px 30px #0009;font-size:12px}.p.open{display:block}.top{display:flex;gap:8px;align-items:center}.top b{flex:1;font-size:15px}.btn{border:1px solid #ffffff33;border-radius:8px;background:#2a2d36;color:#fff;padding:6px 9px}.tabs{display:flex;gap:6px;margin:8px 0}.tabs .on{background:#fff;color:#111}.note{padding:8px;border-radius:8px;background:#272a33;margin:7px 0;line-height:1.45}.red{background:#641726;border:1px solid #ff7484}.yellow{background:#584515;border:1px solid #e3b840}table{width:100%;border-collapse:collapse;font-size:11px}th,td{padding:6px 4px;border-bottom:1px solid #ffffff18;text-align:left;white-space:nowrap}tr.danger{background:#651729}tr.warn{background:#554313}tr.unknown{background:#463e55}.muted{opacity:.62}.name{max-width:130px;overflow:hidden;text-overflow:ellipsis}</style><button class="chip" id="chip">⚓ 待機</button><section class="p" id="panel"><div class="top"><b>⚓ 艦隊状態 v${VERSION}</b><button class="btn" id="notify">通知テスト</button><button class="btn" id="close">閉じる</button></div><div id="debug"></div><div id="summary"></div><div class="tabs"><button class="btn on" id="f1">第1/出撃</button><button class="btn" id="f2">第2艦隊</button></div><div id="fleet"></div><div id="planes"></div></section>`;
     document.documentElement.appendChild(host); S.ui = root; let tab=1;
     const q=x=>root.querySelector(x); q('#chip').onclick=()=>openPanel(); q('#close').onclick=()=>openPanel(false);
     q('#f1').onclick=()=>{tab=1;q('#f1').classList.add('on');q('#f2').classList.remove('on');renderFleet(tab)};
@@ -223,8 +249,9 @@
   function openPanel(v) { if (!S.ui) return; const p=S.ui.querySelector('#panel'); p.classList.toggle('open', typeof v==='boolean'?v:!p.classList.contains('open')); }
   function render() {
     if (!S.ui) return; const q=x=>S.ui.querySelector(x), bad=heavies();
-    q('#chip').textContent = bad.length ? `🚨 大破 ${bad.length}` : S.uncertain ? '⚠️ 判定不明' : '⚓ 状態';
-    q('#chip').style.background = bad.length?'#a4142c':S.uncertain?'#6b5418':'#17191f';
+    q('#chip').textContent = bad.length ? `🚨 大破 ${bad.length}` : S.uncertain ? '⚠️ 判定不明' : S.apiCount ? '⚓ 状態' : '⚓ 待機';
+    q('#chip').style.background = bad.length?'#a4142c':S.uncertain?'#6b5418':S.apiCount?'#17191f':'#5b4c14';
+    q('#debug').innerHTML = `<div class="note">🔧 v${VERSION} / ${esc(location.host)} / API ${S.apiCount}${S.lastApi?` / 最終: ${esc(S.lastApi)}`:''}<br><span class="muted">「⚓ 待機」が見えてAPI 0のままなら、Userscripts自体は動作していて艦これAPIの取得だけが未成功です。</span></div>`;
     q('#summary').innerHTML = (bad.length?`<div class="note red">🚨 大破：${bad.map(x=>esc(x.name)).join(' / ')}<br>進撃ガードを有効化。</div>`:'') + (S.uncertain?`<div class="note yellow">⚠️ HP判定不明：${esc(S.uncertainReason)}</div>`:'') + `<div class="note">HPの <b>*</b> は戦闘APIからの戦闘後計算値。<br>燃料・弾薬・各スロ搭載数は <b>最終取得値</b> で、戦闘後の厳密な現在値とは限りません。</div>`;
     q('#f2').style.display=S.fleet2.length?'':'none'; renderFleet(S.ui.__tab());
     q('#planes').innerHTML=S.planeLoss?`<div class="note">✈️ 直近航空戦：総搭載 ${S.planeLoss.before} / 総損失 ${S.planeLoss.lost}<br><span class="muted">各スロットの損失には按分していません。</span></div>`:'';
@@ -266,5 +293,5 @@
     try{navigator.vibrate?.([180,90,180,90,300])}catch(_){}
   }
 
-  console.info(`[KCS Safety] loaded v${VERSION}`);
+  console.info(`[KCS Safety] loaded v${VERSION} on ${location.href} frame=${window.top!==window.self}`);
 })();
