@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         艦これ Safari Safety
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      0.1.4
+// @version      0.1.5
 // @description  艦隊状態表示・大破警告・進撃3タップロック（Safari軽量版）
 // @match        *://*.dmm.com/*
 // @run-at       document-start
@@ -13,7 +13,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.1.4';
+  const VERSION = '0.1.5';
   const FRAME_MESSAGE = '__KCS_SAFETY_FRAME_API__';
   const GUARD = { x: 0.08, y: 0.16, w: 0.48, h: 0.74 };
   const TRIPLE_TAP_MS = 2400;
@@ -194,9 +194,9 @@
     if (S.ui || !document.documentElement) return;
     const host = document.createElement('div');
     host.id = '__kcs_safety_ui';
-    host.style.cssText = 'position:fixed;z-index:2147483645;right:8px;top:8px;font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif';
+    host.style.cssText = 'position:fixed;z-index:2147483645;right:8px;top:56px;font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif';
     const root = host.attachShadow({mode:'open'});
-    root.innerHTML = `<style>*{box-sizing:border-box}button{font:inherit}.chip{border:0;border-radius:999px;background:#5b4c14;color:#fff;padding:8px 12px;font-weight:800}.p{display:none;position:fixed;right:8px;top:48px;width:min(94vw,560px);max-height:80vh;overflow:auto;background:#15171def;color:#fff;border:1px solid #ffffff33;border-radius:14px;padding:12px;box-shadow:0 10px 30px #0009;font-size:12px}.p.open{display:block}.top{display:flex;gap:8px;align-items:center}.top b{flex:1;font-size:15px}.btn{border:1px solid #ffffff33;border-radius:8px;background:#2a2d36;color:#fff;padding:6px 9px}.tabs{display:flex;gap:6px;margin:8px 0}.tabs .on{background:#fff;color:#111}.note{padding:8px;border-radius:8px;background:#272a33;margin:7px 0;line-height:1.45}.red{background:#641726;border:1px solid #ff7484}.yellow{background:#584515;border:1px solid #e3b840}table{width:100%;border-collapse:collapse;font-size:11px}th,td{padding:6px 4px;border-bottom:1px solid #ffffff18;text-align:left;white-space:nowrap}tr.danger{background:#651729}tr.warn{background:#554313}tr.unknown{background:#463e55}.muted{opacity:.62}.name{max-width:130px;overflow:hidden;text-overflow:ellipsis}</style><button class="chip" id="chip">⚓ 待機</button><section class="p" id="panel"><div class="top"><b>⚓ 艦隊状態 v${VERSION}</b><button class="btn" id="close">閉じる</button></div><div id="debug"></div><div id="summary"></div><div class="tabs"><button class="btn on" id="f1">第1/出撃</button><button class="btn" id="f2">第2艦隊</button></div><div id="fleet"></div><div id="planes"></div></section>`;
+    root.innerHTML = `<style>*{box-sizing:border-box}button{font:inherit}.chip{border:0;border-radius:999px;background:#5b4c14;color:#fff;padding:8px 12px;font-weight:800}.p{display:none;position:fixed;right:8px;top:96px;width:min(94vw,560px);max-height:80vh;overflow:auto;background:#15171def;color:#fff;border:1px solid #ffffff33;border-radius:14px;padding:12px;box-shadow:0 10px 30px #0009;font-size:12px}.p.open{display:block}.top{display:flex;gap:8px;align-items:center}.top b{flex:1;font-size:15px}.btn{border:1px solid #ffffff33;border-radius:8px;background:#2a2d36;color:#fff;padding:6px 9px}.tabs{display:flex;gap:6px;margin:8px 0}.tabs .on{background:#fff;color:#111}.note{padding:8px;border-radius:8px;background:#272a33;margin:7px 0;line-height:1.45}.red{background:#641726;border:1px solid #ff7484}.yellow{background:#584515;border:1px solid #e3b840}table{width:100%;border-collapse:collapse;font-size:11px}th,td{padding:6px 4px;border-bottom:1px solid #ffffff18;text-align:left;white-space:nowrap}tr.danger{background:#651729}tr.warn{background:#554313}tr.unknown{background:#463e55}.muted{opacity:.62}.name{max-width:130px;overflow:hidden;text-overflow:ellipsis}</style><button class="chip" id="chip">⚓ 待機</button><section class="p" id="panel"><div class="top"><b>⚓ 艦隊状態 v${VERSION}</b><button class="btn" id="close">閉じる</button></div><div id="debug"></div><div id="summary"></div><div class="tabs"><button class="btn on" id="f1">第1/出撃</button><button class="btn" id="f2">第2艦隊</button></div><div id="fleet"></div><div id="planes"></div></section>`;
     document.documentElement.appendChild(host);
     S.ui = root;
     let tab = 1;
