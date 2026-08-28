@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         艦これ Safari Safety
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      0.2.0
-// @description  艦隊状態・Cond表示・大破警告・進撃3タップロック（Safari軽量版）
+// @version      0.2.1
+// @description  艦隊状態・Cond表示・大破警告・サイズ可変進撃ブロッカー（Safari軽量版）
 // @match        *://*.dmm.com/*
 // @run-at       document-start
 // @inject-into  content
@@ -13,11 +13,32 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.2.0';
+  const VERSION = '0.2.1';
   const FRAME_MESSAGE = '__KCS_SAFETY_FRAME_API__';
-  const GUARD = { x: 0.08, y: 0.16, w: 0.48, h: 0.74 };
+  const GUARD_STORAGE_KEY = '__KCS_SAFETY_GUARD_V1__';
+  const GUARD_DEFAULT = { cx: 0.32, cy: 0.53, w: 0.48, h: 0.74 };
   const TRIPLE_TAP_MS = 2400;
   const UNLOCK_MS = 5000;
+
+  const clamp = (v, min, max) => Math.min(max, Math.max(min, Number(v)));
+  function loadGuard() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(GUARD_STORAGE_KEY) || 'null');
+      if (!raw) return { ...GUARD_DEFAULT };
+      return {
+        cx: clamp(raw.cx ?? GUARD_DEFAULT.cx, 0, 1),
+        cy: clamp(raw.cy ?? GUARD_DEFAULT.cy, 0, 1),
+        w: clamp(raw.w ?? GUARD_DEFAULT.w, 0.20, 1),
+        h: clamp(raw.h ?? GUARD_DEFAULT.h, 0.20, 1),
+      };
+    } catch (_) {
+      return { ...GUARD_DEFAULT };
+    }
+  }
+  const GUARD = loadGuard();
+  function saveGuard() {
+    try { localStorage.setItem(GUARD_STORAGE_KEY, JSON.stringify(GUARD)); } catch (_) {}
+  }
 
   const S = {
     masterShips: new Map(), ships: new Map(), decks: new Map(),
@@ -25,6 +46,8 @@
     fleet1: [], fleet2: [], hpAfter: new Map(),
     uncertain: false, uncertainReason: '', choice: false,
     planeLoss: null, ui: null, guard: null,
+    guardActive: false, guardPreview: false, guardPreviewTimer: null,
+    lastGameRect: null,
     taps: [], apiCount: 0, lastApi: '',
   };
 
@@ -44,7 +67,6 @@
     else document.addEventListener('DOMContentLoaded', boot, { once: true });
   }
 
-  // 通信監視はBridgeだけに任せる。Safety本体は受信・表示だけ。
   window.addEventListener('message', e => {
     const d = e?.data?.[FRAME_MESSAGE];
     if (d && String(d.url || '').includes('/kcsapi/')) onApi(d);
@@ -232,6 +254,11 @@ button{font:inherit;-webkit-tap-highlight-color:transparent;touch-action:manipul
 .note{padding:8px;border-radius:8px;background:#272a33;margin:7px 0;line-height:1.45}
 .red{background:#641726;border:1px solid #ff7484}
 .yellow{background:#584515;border:1px solid #e3b840}
+.guardset{display:grid;gap:8px}
+.rangeRow{display:grid;grid-template-columns:34px 1fr 48px;align-items:center;gap:8px}
+.rangeRow input{width:100%;min-height:30px}
+.guardBtns{display:flex;gap:8px;flex-wrap:wrap}
+.guardMeta{font-size:11px;opacity:.72}
 .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 table{width:100%;border-collapse:collapse;font-size:11px}
 th,td{padding:7px 4px;border-bottom:1px solid #ffffff18;text-align:left;white-space:nowrap}
@@ -256,6 +283,13 @@ tr.unknown{background:#463e55}
   </div>
   <div id="debug"></div>
   <div id="summary"></div>
+  <div class="note guardset">
+    <b>🚧 進撃ブロッカー</b>
+    <div class="rangeRow"><span>横</span><input id="guardW" type="range" min="20" max="100" step="1" value="${Math.round(GUARD.w * 100)}"><strong id="guardWVal"></strong></div>
+    <div class="rangeRow"><span>縦</span><input id="guardH" type="range" min="20" max="100" step="1" value="${Math.round(GUARD.h * 100)}"><strong id="guardHVal"></strong></div>
+    <div class="guardBtns"><button class="btn" id="guardTest">サイズ確認</button><button class="btn" id="guardReset">初期サイズ</button></div>
+    <div class="guardMeta" id="guardMeta">ゲーム画面を検出中…</div>
+  </div>
   <div class="tabs">
     <button class="btn on" data-fleet="1">第1</button>
     <button class="btn" data-fleet="2">第2</button>
@@ -271,6 +305,18 @@ tr.unknown{background:#463e55}
     const q = x => root.querySelector(x);
     q('#chip').onclick = () => openPanel();
     q('#close').onclick = () => openPanel(false);
+    q('#guardW').oninput = e => {
+      GUARD.w = clamp(Number(e.target.value) / 100, 0.20, 1);
+      saveGuard(); updateGuardSettingsUi(); positionGuard();
+    };
+    q('#guardH').oninput = e => {
+      GUARD.h = clamp(Number(e.target.value) / 100, 0.20, 1);
+      saveGuard(); updateGuardSettingsUi(); positionGuard();
+    };
+    q('#guardReset').onclick = () => {
+      Object.assign(GUARD, GUARD_DEFAULT); saveGuard(); updateGuardSettingsUi(); positionGuard();
+    };
+    q('#guardTest').onclick = () => previewGuard();
     for (const b of root.querySelectorAll('[data-fleet]')) {
       b.onclick = () => {
         tab = Number(b.dataset.fleet || 1);
@@ -279,11 +325,13 @@ tr.unknown{background:#463e55}
       };
     }
     root.__tab = () => tab;
+    updateGuardSettingsUi();
   }
   function openPanel(v) {
     if (!S.ui) return;
     const p = S.ui.querySelector('#panel');
     p.classList.toggle('open', typeof v === 'boolean' ? v : !p.classList.contains('open'));
+    if (p.classList.contains('open')) updateGuardSettingsUi();
   }
   function render() {
     if (!S.ui) return;
@@ -295,8 +343,22 @@ tr.unknown{background:#463e55}
       (bad.length?`<div class="note red">🚨 大破：${bad.map(x=>esc(x.name)).join(' / ')}<br>進撃系ゾーンをロック中。</div>`:'') +
       (S.uncertain?`<div class="note yellow">⚠️ HP判定不明：${esc(S.uncertainReason)}</div>`:'') +
       `<div class="note">HPの <b>*</b> は戦闘APIからの戦闘後計算値。燃料・弾薬・搭載数・Condは最終取得値です。Cond：50以上=キラ / 40〜49=通常 / 30〜39=軽疲労 / 20〜29=橙 / 0〜19=赤。</div>`;
+    updateGuardSettingsUi();
     renderFleet(S.ui.__tab());
     q('#planes').innerHTML = S.planeLoss ? `<div class="note">✈️ 直近航空戦：総搭載 ${S.planeLoss.before} / 総損失 ${S.planeLoss.lost}</div>` : '';
+  }
+  function updateGuardSettingsUi() {
+    if (!S.ui) return;
+    const q = x => S.ui.querySelector(x);
+    const w = Math.round(GUARD.w * 100), h = Math.round(GUARD.h * 100);
+    if (q('#guardW')) q('#guardW').value = String(w);
+    if (q('#guardH')) q('#guardH').value = String(h);
+    if (q('#guardWVal')) q('#guardWVal').textContent = `${w}%`;
+    if (q('#guardHVal')) q('#guardHVal').textContent = `${h}%`;
+    const r = gameRect();
+    if (q('#guardMeta')) q('#guardMeta').textContent = r
+      ? `ゲーム画面 ${Math.round(r.width)}×${Math.round(r.height)}px を検出。ブロッカーはこの枠内だけに表示。`
+      : 'ゲーム画面をまだ検出できていません。母港画面を表示すると再検出します。';
   }
   function renderFleet(tab) {
     if (!S.ui) return;
@@ -313,38 +375,62 @@ tr.unknown{background:#463e55}
   }
 
   function validRect(r) { return r && r.width > 300 && r.height > 180 && r.bottom > 0 && r.right > 0; }
+  function clipRect(r) {
+    if (!r) return null;
+    const left = clamp(r.left, 0, innerWidth);
+    const top = clamp(r.top, 0, innerHeight);
+    const right = clamp(r.right, 0, innerWidth);
+    const bottom = clamp(r.bottom, 0, innerHeight);
+    return { left, top, right, bottom, width: Math.max(0, right-left), height: Math.max(0, bottom-top) };
+  }
   function gameRect() {
-    const frames = [...document.querySelectorAll('iframe')].map(el => el.getBoundingClientRect()).filter(validRect);
+    const targetAspect = 1200 / 720;
+    const frames = [...document.querySelectorAll('iframe')].map(el => {
+      const r = clipRect(el.getBoundingClientRect());
+      const src = String(el.getAttribute('src') || '');
+      const hint = /kancolle|kcs|osapi|gadgets|dmm/i.test(src) ? 1.8 : 1;
+      const aspect = r?.height ? r.width / r.height : 0;
+      const score = r ? (r.width * r.height * hint) / (1 + Math.abs(aspect - targetAspect) * 5) : 0;
+      return { r, score };
+    }).filter(x => validRect(x.r));
     if (frames.length) {
-      const targetAspect = 1200 / 720;
-      frames.sort((a,b) => {
-        const sa = a.width*a.height/(1+Math.abs(a.width/a.height-targetAspect)*4);
-        const sb = b.width*b.height/(1+Math.abs(b.width/b.height-targetAspect)*4);
-        return sb-sa;
-      });
-      return frames[0];
+      frames.sort((a,b) => b.score - a.score);
+      S.lastGameRect = { ...frames[0].r };
+      return S.lastGameRect;
     }
-    return { left:0, top:0, width:innerWidth, height:innerHeight, right:innerWidth, bottom:innerHeight };
+    if (validRect(S.lastGameRect)) {
+      const r = clipRect(S.lastGameRect);
+      if (validRect(r)) return r;
+    }
+    return null;
   }
 
   function ensureGuard() {
     if (S.guard?.isConnected) return S.guard;
     const g = document.createElement('div');
-    g.style.cssText = 'position:fixed;z-index:2147483646;display:none;align-items:center;justify-content:center;text-align:center;background:rgba(180,0,25,.88);border:4px solid #ff9cab;border-radius:16px;color:white;font:900 clamp(12px,2.5vw,24px)/1.35 -apple-system,BlinkMacSystemFont,sans-serif;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent';
+    g.style.cssText = 'position:fixed;z-index:2147483646;display:none;align-items:center;justify-content:center;text-align:center;background:rgba(180,0,25,.88);border:4px solid #ff9cab;border-radius:16px;color:white;font:900 clamp(12px,2.5vw,24px)/1.35 -apple-system,BlinkMacSystemFont,sans-serif;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;overflow:hidden';
     const stop = e => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation?.(); };
-    g.addEventListener('touchstart', e => { stop(e); guardTap(); }, { passive:false, capture:true });
+    g.addEventListener('touchstart', e => { stop(e); if (!S.guardPreview) guardTap(); }, { passive:false, capture:true });
     g.addEventListener('touchend', stop, { passive:false, capture:true });
-    g.addEventListener('pointerdown', e => { stop(e); if (e.pointerType !== 'touch') guardTap(); }, { passive:false, capture:true });
+    g.addEventListener('pointerdown', e => { stop(e); if (!S.guardPreview && e.pointerType !== 'touch') guardTap(); }, { passive:false, capture:true });
     g.addEventListener('pointerup', stop, { passive:false, capture:true });
     g.addEventListener('click', stop, true);
     document.documentElement.appendChild(g);
     S.guard = g;
-    addEventListener('resize', positionGuard, {passive:true});
-    addEventListener('orientationchange', () => setTimeout(positionGuard, 100), {passive:true});
+    addEventListener('resize', () => { positionGuard(); updateGuardSettingsUi(); }, {passive:true});
+    addEventListener('orientationchange', () => setTimeout(() => { positionGuard(); updateGuardSettingsUi(); }, 100), {passive:true});
+    addEventListener('scroll', positionGuard, {passive:true, capture:true});
+    if (window.visualViewport) {
+      visualViewport.addEventListener('resize', () => { positionGuard(); updateGuardSettingsUi(); }, {passive:true});
+      visualViewport.addEventListener('scroll', positionGuard, {passive:true});
+    }
     return g;
   }
   function showGuard(bad) {
     const g = ensureGuard();
+    if (S.guardPreviewTimer) clearTimeout(S.guardPreviewTimer);
+    S.guardPreview = false;
+    S.guardActive = true;
     S.taps = [];
     g.style.pointerEvents = 'auto';
     g.style.background = 'rgba(180,0,25,.88)';
@@ -352,14 +438,49 @@ tr.unknown{background:#463e55}
     g.style.display = 'flex';
     positionGuard();
   }
-  function hideGuard() { if (S.guard) S.guard.style.display = 'none'; S.taps = []; }
+  function previewGuard() {
+    const g = ensureGuard();
+    if (S.guardPreviewTimer) clearTimeout(S.guardPreviewTimer);
+    S.guardPreview = true;
+    S.guardActive = true;
+    g.style.pointerEvents = 'none';
+    g.style.background = 'rgba(180,0,25,.62)';
+    g.innerHTML = '<div>🚧 サイズ確認<br><small>ゲーム画面の外には出ません</small></div>';
+    g.style.display = 'flex';
+    positionGuard();
+    S.guardPreviewTimer = setTimeout(() => {
+      S.guardPreview = false;
+      S.guardPreviewTimer = null;
+      if (S.choice && (heavies().length || S.uncertain)) showGuard(heavies());
+      else hideGuard();
+    }, 4000);
+  }
+  function hideGuard() {
+    if (S.guardPreviewTimer) clearTimeout(S.guardPreviewTimer);
+    S.guardPreviewTimer = null;
+    S.guardPreview = false;
+    S.guardActive = false;
+    if (S.guard) S.guard.style.display = 'none';
+    S.taps = [];
+  }
   function positionGuard() {
-    if (!S.guard || S.guard.style.display === 'none') return;
+    if (!S.guard || !S.guardActive) return;
     const r = gameRect();
-    S.guard.style.left = `${r.left + r.width * GUARD.x}px`;
-    S.guard.style.top = `${r.top + r.height * GUARD.y}px`;
-    S.guard.style.width = `${r.width * GUARD.w}px`;
-    S.guard.style.height = `${r.height * GUARD.h}px`;
+    if (!r) {
+      S.guard.style.visibility = 'hidden';
+      return;
+    }
+    S.guard.style.visibility = 'visible';
+    const w = Math.min(r.width, Math.max(96, r.width * GUARD.w));
+    const h = Math.min(r.height, Math.max(72, r.height * GUARD.h));
+    let left = r.left + r.width * GUARD.cx - w / 2;
+    let top = r.top + r.height * GUARD.cy - h / 2;
+    left = clamp(left, r.left, r.right - w);
+    top = clamp(top, r.top, r.bottom - h);
+    S.guard.style.left = `${Math.round(left)}px`;
+    S.guard.style.top = `${Math.round(top)}px`;
+    S.guard.style.width = `${Math.round(w)}px`;
+    S.guard.style.height = `${Math.round(h)}px`;
   }
   function guardTap() {
     const n = Date.now();
