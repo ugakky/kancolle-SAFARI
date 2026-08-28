@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         艦これ Safari Safety Bridge
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      0.1.4
+// @version      0.1.5
 // @description  艦これ本体ページ側で必要なkcsapiだけ軽量転送するBridge
 // @match        *://*.kancolle-server.com/*
 // @include      *://203.104.209.*/*
@@ -41,6 +41,7 @@
     api_id:x.api_id,
     api_ship_id:x.api_ship_id,
     api_lv:x.api_lv,
+    api_cond:x.api_cond,
     api_fuel:x.api_fuel,
     api_bull:x.api_bull,
     api_onslot:x.api_onslot,
@@ -114,7 +115,6 @@
     post({ url:String(url), body:typeof body === 'string' ? body : String(body || ''), text });
   };
 
-  // 起動確認。非常に小さいメッセージだけ送る。
   post({
     url:`${location.origin}/kcsapi/__bridge_heartbeat__`,
     body:'',
@@ -164,5 +164,5 @@
     console.warn('[KCS Safety Bridge] fetch hook failed', e);
   }
 
-  console.info('[KCS Safety Bridge] loaded v0.1.4 lightweight', location.href);
+  console.info('[KCS Safety Bridge] loaded v0.1.5 lightweight+cond', location.href);
 })();
