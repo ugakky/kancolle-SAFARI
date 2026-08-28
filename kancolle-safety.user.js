@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         艦これ Safari Safety
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      0.2.1
-// @description  艦隊状態・Cond表示・大破警告・サイズ可変進撃ブロッカー（Safari軽量版）
+// @version      0.2.2
+// @description  艦隊状態・Cond表示・大破警告・5:3ゲーム領域対応のサイズ可変進撃ブロッカー（Safari軽量版）
 // @match        *://*.dmm.com/*
 // @run-at       document-start
 // @inject-into  content
@@ -13,10 +13,11 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.2.1';
+  const VERSION = '0.2.2';
   const FRAME_MESSAGE = '__KCS_SAFETY_FRAME_API__';
   const GUARD_STORAGE_KEY = '__KCS_SAFETY_GUARD_V1__';
   const GUARD_DEFAULT = { cx: 0.32, cy: 0.53, w: 0.48, h: 0.74 };
+  const GAME_ASPECT = 1200 / 720;
   const TRIPLE_TAP_MS = 2400;
   const UNLOCK_MS = 5000;
 
@@ -212,6 +213,7 @@
     return ['健在','ok'];
   }
   function condInfo(value) {
+    if (value === null || value === undefined || value === '') return { text:'? 不明', cls:'cond-unknown' };
     const c = Number(value);
     if (!Number.isFinite(c)) return { text:'? 不明', cls:'cond-unknown' };
     if (c >= 50) return { text:`✨ ${c} キラ`, cls:'cond-kira' };
@@ -357,7 +359,7 @@ tr.unknown{background:#463e55}
     if (q('#guardHVal')) q('#guardHVal').textContent = `${h}%`;
     const r = gameRect();
     if (q('#guardMeta')) q('#guardMeta').textContent = r
-      ? `ゲーム画面 ${Math.round(r.width)}×${Math.round(r.height)}px を検出。ブロッカーはこの枠内だけに表示。`
+      ? `ゲーム本体 ${Math.round(r.width)}×${Math.round(r.height)}px（5:3）を検出。縦横どちらでもこの枠内だけに表示。`
       : 'ゲーム画面をまだ検出できていません。母港画面を表示すると再検出します。';
   }
   function renderFleet(tab) {
@@ -383,14 +385,25 @@ tr.unknown{background:#463e55}
     const bottom = clamp(r.bottom, 0, innerHeight);
     return { left, top, right, bottom, width: Math.max(0, right-left), height: Math.max(0, bottom-top) };
   }
+  function cropGameRect(raw) {
+    if (!raw || raw.width <= 0 || raw.height <= 0) return null;
+    const gameHeight = Math.min(raw.height, raw.width / GAME_ASPECT);
+    return clipRect({
+      left: raw.left,
+      top: raw.top,
+      right: raw.right,
+      bottom: raw.top + gameHeight,
+      width: raw.width,
+      height: gameHeight,
+    });
+  }
   function gameRect() {
-    const targetAspect = 1200 / 720;
     const frames = [...document.querySelectorAll('iframe')].map(el => {
-      const r = clipRect(el.getBoundingClientRect());
+      const raw = el.getBoundingClientRect();
+      const r = cropGameRect(raw);
       const src = String(el.getAttribute('src') || '');
-      const hint = /kancolle|kcs|osapi|gadgets|dmm/i.test(src) ? 1.8 : 1;
-      const aspect = r?.height ? r.width / r.height : 0;
-      const score = r ? (r.width * r.height * hint) / (1 + Math.abs(aspect - targetAspect) * 5) : 0;
+      const hint = /kancolle|kcs|osapi|gadgets/i.test(src) ? 2.2 : 1;
+      const score = r ? r.width * r.height * hint : 0;
       return { r, score };
     }).filter(x => validRect(x.r));
     if (frames.length) {
@@ -418,10 +431,10 @@ tr.unknown{background:#463e55}
     document.documentElement.appendChild(g);
     S.guard = g;
     addEventListener('resize', () => { positionGuard(); updateGuardSettingsUi(); }, {passive:true});
-    addEventListener('orientationchange', () => setTimeout(() => { positionGuard(); updateGuardSettingsUi(); }, 100), {passive:true});
+    addEventListener('orientationchange', () => setTimeout(() => { S.lastGameRect = null; positionGuard(); updateGuardSettingsUi(); }, 100), {passive:true});
     addEventListener('scroll', positionGuard, {passive:true, capture:true});
     if (window.visualViewport) {
-      visualViewport.addEventListener('resize', () => { positionGuard(); updateGuardSettingsUi(); }, {passive:true});
+      visualViewport.addEventListener('resize', () => { S.lastGameRect = null; positionGuard(); updateGuardSettingsUi(); }, {passive:true});
       visualViewport.addEventListener('scroll', positionGuard, {passive:true});
     }
     return g;
@@ -445,7 +458,7 @@ tr.unknown{background:#463e55}
     S.guardActive = true;
     g.style.pointerEvents = 'none';
     g.style.background = 'rgba(180,0,25,.62)';
-    g.innerHTML = '<div>🚧 サイズ確認<br><small>ゲーム画面の外には出ません</small></div>';
+    g.innerHTML = '<div>🚧 サイズ確認<br><small>ゲーム本体（5:3）の外には出ません</small></div>';
     g.style.display = 'flex';
     positionGuard();
     S.guardPreviewTimer = setTimeout(() => {
