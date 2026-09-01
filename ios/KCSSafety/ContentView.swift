@@ -69,11 +69,11 @@ struct ContentView: View {
             Button {
                 showSupportPanel = true
             } label: {
-                Image(systemName: browser.snapshot?.heavyCount ?? 0 > 0 ? "exclamationmark.shield.fill" : "list.bullet.rectangle")
+                Image(systemName: hasHeavyDamage ? "exclamationmark.shield.fill" : "list.bullet.rectangle")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .tint(browser.snapshot?.heavyCount ?? 0 > 0 ? .red : nil)
+            .tint(hasHeavyDamage ? .red : .accentColor)
             .accessibilityLabel("艦隊状態と設定")
 
             if ads.privacyOptionsRequired {
@@ -101,8 +101,12 @@ struct ContentView: View {
         .background(.bar)
     }
 
+    private var hasHeavyDamage: Bool {
+        (browser.snapshot?.heavyCount ?? 0) > 0
+    }
+
     private var statusColor: Color {
-        if browser.snapshot?.heavyCount ?? 0 > 0 { return .red }
+        if hasHeavyDamage { return .red }
         if browser.snapshot?.uncertain == true { return .orange }
         return .secondary
     }
