@@ -20,7 +20,7 @@ struct ProgressGuardLayer: View {
                         Text("5:3ゲーム領域内")
                             .font(.caption.bold())
                     } else {
-                        Text(browser.snapshot?.heavyCount ?? 0 > 0 ? "🚨 大破艦あり" : "⚠️ HP判定不明")
+                        Text((browser.snapshot?.heavyCount ?? 0) > 0 ? "🚨 大破艦あり" : "⚠️ HP判定不明")
                             .font(.headline.bold())
                         Text("進撃系操作をロック中")
                             .font(.caption.bold())
@@ -58,11 +58,16 @@ struct ProgressGuardLayer: View {
 
         guard gameWidth >= 120, gameHeight >= 72 else { return nil }
 
-        let width = min(gameWidth, max(96, gameWidth * browser.guardWidthFraction))
-        let height = min(gameHeight, max(72, gameHeight * browser.guardHeightFraction))
+        let widthFraction = CGFloat(browser.guardWidthFraction)
+        let heightFraction = CGFloat(browser.guardHeightFraction)
+        let centerX = CGFloat(browser.guardCenterX)
+        let centerY = CGFloat(browser.guardCenterY)
 
-        var left = gameX + gameWidth * browser.guardCenterX - width / 2
-        var top = gameY + gameHeight * browser.guardCenterY - height / 2
+        let width = min(gameWidth, max(96, gameWidth * widthFraction))
+        let height = min(gameHeight, max(72, gameHeight * heightFraction))
+
+        var left = gameX + gameWidth * centerX - width / 2
+        var top = gameY + gameHeight * centerY - height / 2
 
         left = min(max(left, gameX), gameX + gameWidth - width)
         top = min(max(top, gameY), gameY + gameHeight - height)
