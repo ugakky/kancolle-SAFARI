@@ -40,7 +40,6 @@ final class BrowserModel: ObservableObject {
         static let centerX = 0.32
         static let centerY = 0.53
         static let tapWindow: TimeInterval = 2.4
-        static let unlockSeconds: UInt64 = 5
     }
 
     init() {
@@ -61,6 +60,7 @@ final class BrowserModel: ObservableObject {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.defaultWebpagePreferences.preferredContentMode = .desktop
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
 
         let bridge = WKUserScript(
@@ -71,6 +71,7 @@ final class BrowserModel: ObservableObject {
         configuration.userContentController.addUserScript(bridge)
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
         webView.allowsBackForwardNavigationGestures = false
         webView.scrollView.bounces = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
@@ -82,7 +83,8 @@ final class BrowserModel: ObservableObject {
     var shouldShowGuard: Bool {
         if guardPreview { return true }
         guard snapshot?.choice == true else { return false }
-        guard snapshot?.heavyCount ?? 0 > 0 || snapshot?.uncertain == true else { return false }
+        let isDangerous = (snapshot?.heavyCount ?? 0) > 0 || snapshot?.uncertain == true
+        guard isDangerous else { return false }
         return !guardTemporarilyUnlocked
     }
 
@@ -122,7 +124,7 @@ final class BrowserModel: ObservableObject {
 
         recoveryTask?.cancel()
         recoveryTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(700))
+            try? await Task.sleep(nanoseconds: 700_000_000)
             guard !Task.isCancelled, let self else { return }
             if self.webView.url != nil {
                 self.webView.reload()
@@ -187,7 +189,7 @@ final class BrowserModel: ObservableObject {
 
         relockTask?.cancel()
         relockTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(GuardDefaults.unlockSeconds))
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
             guard !Task.isCancelled, let self else { return }
             self.guardTemporarilyUnlocked = false
         }
@@ -198,7 +200,7 @@ final class BrowserModel: ObservableObject {
         guardPreview = true
 
         previewTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(4))
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
             guard !Task.isCancelled, let self else { return }
             self.guardPreview = false
         }
