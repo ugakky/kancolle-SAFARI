@@ -28,4 +28,4 @@ targets:
       - package: GoogleMobileAds
         product: GoogleMobileAds
       - package: UserMessagingPlatform
-        product: UserMessagingPlatform
+        product: GoogleUserMessagingPlatform
