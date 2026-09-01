@@ -52,4 +52,4 @@ jobs:
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
-            build | xcpretty
+            build 2>&1 | tee xcodebuild.log
