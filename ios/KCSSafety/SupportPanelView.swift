@@ -165,9 +165,15 @@ struct SupportPanelView: View {
                 Label("進撃ブロッカー", systemImage: "hand.raised.fill")
                     .font(.headline)
                 Spacer()
-                Button("確認") { browser.previewGuard() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                Button("確認") {
+                    dismiss()
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                        browser.previewGuard()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
 
             sliderRow(title: "横", value: $browser.guardWidthFraction)
