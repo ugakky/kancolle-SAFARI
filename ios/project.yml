@@ -6,10 +6,10 @@ options:
 packages:
   GoogleMobileAds:
     url: https://github.com/googleads/swift-package-manager-google-mobile-ads.git
-    from: 13.0.0
+    from: 13.9.0
   UserMessagingPlatform:
     url: https://github.com/googleads/swift-package-manager-google-user-messaging-platform.git
-    from: 3.0.0
+    from: 3.1.0
 targets:
   KCSSafety:
     type: application
