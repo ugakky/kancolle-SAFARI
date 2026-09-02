@@ -3,7 +3,6 @@ import UIKit
 
 struct ContentView: View {
     @EnvironmentObject private var browser: BrowserModel
-    @EnvironmentObject private var ads: AdManager
 
     @State private var memoryWarningCount = 0
     @State private var showSupportPanel = false
@@ -19,9 +18,6 @@ struct ContentView: View {
                     ProgressGuardLayer(containerSize: proxy.size)
                 }
             }
-
-            Divider()
-            AdBannerArea()
         }
         .ignoresSafeArea(.keyboard)
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
@@ -75,17 +71,6 @@ struct ContentView: View {
             .controlSize(.small)
             .tint(hasHeavyDamage ? .red : .accentColor)
             .accessibilityLabel("艦隊状態と設定")
-
-            if ads.privacyOptionsRequired {
-                Button {
-                    Task { await ads.presentPrivacyOptions() }
-                } label: {
-                    Image(systemName: "hand.raised")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityLabel("広告プライバシー設定")
-            }
 
             Button {
                 browser.reload()
