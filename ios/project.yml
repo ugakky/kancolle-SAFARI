@@ -3,13 +3,6 @@ options:
   bundleIdPrefix: com.ugakky
   deploymentTarget:
     iOS: "16.0"
-packages:
-  GoogleMobileAds:
-    url: https://github.com/googleads/swift-package-manager-google-mobile-ads.git
-    from: 13.9.0
-  UserMessagingPlatform:
-    url: https://github.com/googleads/swift-package-manager-google-user-messaging-platform.git
-    from: 3.1.0
 targets:
   KCSSafety:
     type: application
@@ -24,8 +17,3 @@ targets:
         PRODUCT_NAME: KCS Safety
         SWIFT_VERSION: 6.0
         TARGETED_DEVICE_FAMILY: "1,2"
-    dependencies:
-      - package: GoogleMobileAds
-        product: GoogleMobileAds
-      - package: UserMessagingPlatform
-        product: GoogleUserMessagingPlatform
