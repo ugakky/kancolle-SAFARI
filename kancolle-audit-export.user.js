@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         艦これ Safari Audit Export
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      0.1.0
+// @version      0.1.1
 // @description  艦これが通常操作で受信したAPIレスポンスだけを受動収集し、監査用JSONを書き出す
 // @match        *://*.dmm.com/*
 // @match        *://*.kancolle-server.com/*
@@ -15,7 +15,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.1.0';
+  const VERSION = '0.1.1';
   const MESSAGE = '__KCS_AUDIT_FRAME_API__';
   const GAME_HOST = /(^|\.)kancolle-server\.com$/i.test(location.hostname) || /^203\.104\.209\.\d+$/.test(location.hostname);
   const DMM_TOP = /(^|\.)dmm\.com$/i.test(location.hostname) && window.top === window;
@@ -402,9 +402,8 @@
           <button class="btn" id="auditShare">共有</button>
         </div>
         <div class="muted" style="margin-top:6px">受動監視のみ。ゲームサーバーへの追加リクエストは0件です。APIトークンも保存しません。</div>`;
-      const tabs = root.querySelector('.tabs');
-      if (tabs) panel.insertBefore(box, tabs);
-      else panel.appendChild(box);
+      // Keep export controls below the fleet and blocker settings.
+      panel.appendChild(box);
       root.querySelector('#auditDownload').onclick = downloadAudit;
       root.querySelector('#auditShare').onclick = shareAudit;
       renderUi();
