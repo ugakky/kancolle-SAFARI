@@ -1,0 +1,19 @@
+name: KCSSafety
+options:
+  bundleIdPrefix: com.ugakky
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  KCSSafety:
+    type: application
+    platform: iOS
+    sources:
+      - KCSSafety
+    info:
+      path: KCSSafety/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ugakky.kcssafety
+        PRODUCT_NAME: KCS Safety
+        SWIFT_VERSION: 6.0
+        TARGETED_DEVICE_FAMILY: "1,2"
