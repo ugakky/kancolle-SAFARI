@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import WebKit
+import UserNotifications
 
 @MainActor
 final class BrowserModel: ObservableObject {
@@ -9,6 +10,8 @@ final class BrowserModel: ObservableObject {
     @Published var lastTerminationAt: Date?
     @Published var snapshot: KCSSnapshot?
     @Published var gameRect: KCSGameRect?
+    @Published var expeditionSnapshot: KCSExpeditionSnapshot?
+    @Published var expeditionNotificationsEnabled: Bool
 
     @Published var guardTapCount = 0
     @Published var guardPreview = false
@@ -45,6 +48,8 @@ final class BrowserModel: ObservableObject {
 
     init() {
         let defaults = UserDefaults.standard
+        expeditionNotificationsEnabled = defaults.bool(forKey: "expedition.notifications.enabled")
+
         if defaults.object(forKey: "guard.width") != nil {
             guardWidthFraction = defaults.double(forKey: "guard.width")
         }
@@ -70,6 +75,13 @@ final class BrowserModel: ObservableObject {
             forMainFrameOnly: false
         )
         configuration.userContentController.addUserScript(bridge)
+
+        let expeditionBridge = WKUserScript(
+            source: KCSExpeditionBridgeScript.source,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        )
+        configuration.userContentController.addUserScript(expeditionBridge)
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15"
@@ -99,6 +111,7 @@ final class BrowserModel: ObservableObject {
         statusText = "再読み込み中"
         snapshot = nil
         gameRect = nil
+        expeditionSnapshot = nil
         clearGuardSession()
         webView.reload()
     }
@@ -118,9 +131,10 @@ final class BrowserModel: ObservableObject {
         lastTerminationAt = Date()
         statusText = "WebKit終了 - 自動復旧中"
 
-        // 古いHP/Condを安全情報として残さない。
+        // 古いHP/Cond/遠征情報を安全情報として残さない。
         snapshot = nil
         gameRect = nil
+        expeditionSnapshot = nil
         clearGuardSession()
 
         recoveryTask?.cancel()
@@ -165,12 +179,39 @@ final class BrowserModel: ObservableObject {
                     gameRect = rect
                 }
 
+            case "expedition":
+                guard let next = envelope.expedition else { return }
+                expeditionSnapshot = next
+                if expeditionNotificationsEnabled {
+                    syncExpeditionNotifications(next)
+                }
+
             default:
                 break
             }
         } catch {
             statusText = "Bridge解析エラー"
             print("[KCS Safety] bridge decode error:", error)
+        }
+    }
+
+    func setExpeditionNotificationsEnabled(_ enabled: Bool) {
+        if !enabled {
+            expeditionNotificationsEnabled = false
+            UserDefaults.standard.set(false, forKey: "expedition.notifications.enabled")
+            removeExpeditionNotifications()
+            return
+        }
+
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] granted, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.expeditionNotificationsEnabled = granted
+                UserDefaults.standard.set(granted, forKey: "expedition.notifications.enabled")
+                if granted, let snapshot = self.expeditionSnapshot {
+                    self.syncExpeditionNotifications(snapshot)
+                }
+            }
         }
     }
 
@@ -235,5 +276,41 @@ final class BrowserModel: ObservableObject {
         defaults.set(guardHeightFraction, forKey: "guard.height")
         defaults.set(guardCenterX, forKey: "guard.centerX")
         defaults.set(guardCenterY, forKey: "guard.centerY")
+    }
+
+    private func expeditionNotificationId(for fleetId: Int) -> String {
+        "kcs.expedition.fleet.\(fleetId)"
+    }
+
+    private func removeExpeditionNotifications() {
+        let ids = [2, 3, 4].map(expeditionNotificationId(for:))
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ids)
+    }
+
+    private func syncExpeditionNotifications(_ snapshot: KCSExpeditionSnapshot) {
+        let center = UNUserNotificationCenter.current()
+        let ids = [2, 3, 4].map(expeditionNotificationId(for:))
+        center.removePendingNotificationRequests(withIdentifiers: ids)
+
+        let nowMillis = Date().timeIntervalSince1970 * 1000
+        for fleet in snapshot.fleets {
+            guard fleet.isRunning,
+                  let completion = fleet.completionTimeMillis,
+                  completion > nowMillis + 1_000 else { continue }
+
+            let seconds = max(1, (completion - nowMillis) / 1000)
+            let content = UNMutableNotificationContent()
+            content.title = "第\(fleet.id)艦隊が帰投します"
+            content.body = fleet.missionName ?? "遠征が完了予定です"
+            content.sound = .default
+
+            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: seconds, repeats: false)
+            let request = UNNotificationRequest(
+                identifier: expeditionNotificationId(for: fleet.id),
+                content: content,
+                trigger: trigger
+            )
+            center.add(request)
+        }
     }
 }
