@@ -6,6 +6,7 @@ struct ContentView: View {
 
     @State private var memoryWarningCount = 0
     @State private var showSupportPanel = false
+    @State private var showExpeditionCenter = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,6 +26,10 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showSupportPanel) {
             SupportPanelView()
+                .environmentObject(browser)
+        }
+        .sheet(isPresented: $showExpeditionCenter) {
+            ExpeditionCenterView()
                 .environmentObject(browser)
         }
     }
@@ -63,6 +68,16 @@ struct ContentView: View {
             }
 
             Button {
+                showExpeditionCenter = true
+            } label: {
+                Image(systemName: runningExpeditionCount > 0 ? "paperplane.circle.fill" : "paperplane")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(runningExpeditionCount > 0 ? .blue : .accentColor)
+            .accessibilityLabel("遠征センター")
+
+            Button {
                 showSupportPanel = true
             } label: {
                 Image(systemName: hasHeavyDamage ? "exclamationmark.shield.fill" : "list.bullet.rectangle")
@@ -88,6 +103,10 @@ struct ContentView: View {
 
     private var hasHeavyDamage: Bool {
         (browser.snapshot?.heavyCount ?? 0) > 0
+    }
+
+    private var runningExpeditionCount: Int {
+        browser.expeditionSnapshot?.fleets.filter(\.isRunning).count ?? 0
     }
 
     private var statusColor: Color {

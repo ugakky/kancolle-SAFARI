@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         艦これ Safari Safety
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      0.2.2
-// @description  艦隊状態・Cond表示・大破警告・5:3ゲーム領域対応のサイズ可変進撃ブロッカー（Safari軽量版）
+// @version      0.2.3
+// @description  艦隊状態・Cond表示・大破点滅警告・5:3ゲーム領域対応のサイズ可変進撃ブロッカー（Safari軽量版）
 // @match        *://*.dmm.com/*
 // @run-at       document-start
 // @inject-into  content
@@ -13,7 +13,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.2.2';
+  const VERSION = '0.2.3';
   const FRAME_MESSAGE = '__KCS_SAFETY_FRAME_API__';
   const GUARD_STORAGE_KEY = '__KCS_SAFETY_GUARD_V1__';
   const GUARD_DEFAULT = { cx: 0.32, cy: 0.53, w: 0.48, h: 0.74 };
@@ -231,7 +231,7 @@
     const bad = heavies();
     if (bad.length || S.uncertain) showGuard(bad);
     else hideGuard();
-    openPanel(true);
+    // 状態パネルは自動で開かない。必要なときだけ右上の状態ボタンから開く。
   }
 
   function ensureUi() {
@@ -243,7 +243,9 @@
     root.innerHTML = `<style>
 *{box-sizing:border-box}
 button{font:inherit;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
-.chip{border:0;border-radius:999px;background:#5b4c14;color:#fff;padding:10px 14px;font-weight:800;min-height:42px}
+.chip{border:0;border-radius:999px;background:#5b4c14;color:#fff;padding:10px 14px;font-weight:800;min-height:42px;transform-origin:top right;transition:transform .14s ease,padding .14s ease,font-size .14s ease}
+@keyframes kcsHeavyBlink{0%,49%{background:#b20d2a;color:#fff;border-color:#fff;box-shadow:0 0 0 3px #ff5068aa,0 6px 20px #0008}50%,100%{background:#fff;color:#b20d2a;border-color:#b20d2a;box-shadow:0 0 0 3px #ffffffaa,0 6px 20px #0008}}
+.chip.heavy-alert{animation:kcsHeavyBlink .65s steps(1,end) infinite;transform:scale(1.12);padding:12px 17px;min-height:48px;font-size:15px;border:2px solid #fff}
 .p{display:none;position:fixed;right:8px;top:96px;width:min(96vw,660px);max-height:82vh;overflow:auto;background:#15171df2;color:#fff;border:1px solid #ffffff33;border-radius:14px;padding:12px;box-shadow:0 10px 30px #0009;font-size:12px}
 .p.open{display:block}
 .top{display:flex;gap:10px;align-items:center;position:sticky;top:-12px;z-index:2;background:#15171df7;padding:10px 0 8px}
@@ -338,8 +340,11 @@ tr.unknown{background:#463e55}
   function render() {
     if (!S.ui) return;
     const q = x => S.ui.querySelector(x), bad = heavies();
-    q('#chip').textContent = bad.length ? `🚨 大破 ${bad.length}` : S.uncertain ? '⚠️ 判定不明' : S.apiCount ? '⚓ 状態' : '⚓ 待機';
-    q('#chip').style.background = bad.length?'#a4142c':S.uncertain?'#6b5418':S.apiCount?'#17191f':'#5b4c14';
+    const chip = q('#chip');
+    chip.textContent = bad.length ? `🚨 大破 ${bad.length}` : S.uncertain ? '⚠️ 判定不明' : S.apiCount ? '⚓ 状態' : '⚓ 待機';
+    chip.classList.toggle('heavy-alert', bad.length > 0);
+    chip.style.background = bad.length ? '' : S.uncertain?'#6b5418':S.apiCount?'#17191f':'#5b4c14';
+    chip.style.color = bad.length ? '' : '#fff';
     q('#debug').innerHTML = `<div class="note">🔧 v${VERSION} / API ${S.apiCount}${S.lastApi?` / 最終: ${esc(S.lastApi)}`:''}<br><span class="muted">軽量モード：通信監視はBridgeだけで実行。</span></div>`;
     q('#summary').innerHTML =
       (bad.length?`<div class="note red">🚨 大破：${bad.map(x=>esc(x.name)).join(' / ')}<br>進撃系ゾーンをロック中。</div>`:'') +
