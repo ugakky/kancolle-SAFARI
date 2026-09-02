@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         艦これ Safari Safety
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      0.2.2
+// @version      0.2.3
 // @description  艦隊状態・Cond表示・大破警告・5:3ゲーム領域対応のサイズ可変進撃ブロッカー（Safari軽量版）
 // @match        *://*.dmm.com/*
 // @run-at       document-start
@@ -13,7 +13,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.2.2';
+  const VERSION = '0.2.3';
   const FRAME_MESSAGE = '__KCS_SAFETY_FRAME_API__';
   const GUARD_STORAGE_KEY = '__KCS_SAFETY_GUARD_V1__';
   const GUARD_DEFAULT = { cx: 0.32, cy: 0.53, w: 0.48, h: 0.74 };
@@ -285,13 +285,6 @@ tr.unknown{background:#463e55}
   </div>
   <div id="debug"></div>
   <div id="summary"></div>
-  <div class="note guardset">
-    <b>🚧 進撃ブロッカー</b>
-    <div class="rangeRow"><span>横</span><input id="guardW" type="range" min="20" max="100" step="1" value="${Math.round(GUARD.w * 100)}"><strong id="guardWVal"></strong></div>
-    <div class="rangeRow"><span>縦</span><input id="guardH" type="range" min="20" max="100" step="1" value="${Math.round(GUARD.h * 100)}"><strong id="guardHVal"></strong></div>
-    <div class="guardBtns"><button class="btn" id="guardTest">サイズ確認</button><button class="btn" id="guardReset">初期サイズ</button></div>
-    <div class="guardMeta" id="guardMeta">ゲーム画面を検出中…</div>
-  </div>
   <div class="tabs">
     <button class="btn on" data-fleet="1">第1</button>
     <button class="btn" data-fleet="2">第2</button>
@@ -300,6 +293,13 @@ tr.unknown{background:#463e55}
   </div>
   <div id="fleet"></div>
   <div id="planes"></div>
+  <div class="note guardset">
+    <b>🚧 進撃ブロッカー</b>
+    <div class="rangeRow"><span>横</span><input id="guardW" type="range" min="20" max="100" step="1" value="${Math.round(GUARD.w * 100)}"><strong id="guardWVal"></strong></div>
+    <div class="rangeRow"><span>縦</span><input id="guardH" type="range" min="20" max="100" step="1" value="${Math.round(GUARD.h * 100)}"><strong id="guardHVal"></strong></div>
+    <div class="guardBtns"><button class="btn" id="guardTest">サイズ確認</button><button class="btn" id="guardReset">初期サイズ</button></div>
+    <div class="guardMeta" id="guardMeta">ゲーム画面を検出中…</div>
+  </div>
 </section>`;
     document.documentElement.appendChild(host);
     S.ui = root;
