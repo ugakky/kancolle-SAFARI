@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         艦これ Safari Safety
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      0.2.3
-// @description  艦隊状態・Cond表示・大破点滅警告・5:3ゲーム領域対応のサイズ可変進撃ブロッカー（Safari軽量版）
+// @version      0.2.4
+// @description  艦隊状態・Cond表示・ダメコン判定・大破警告・消去可能ブロッカー・ゲーム画面スクショ（Safari軽量版）
 // @match        *://*.dmm.com/*
 // @run-at       document-start
 // @inject-into  content
@@ -13,8 +13,11 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.2.3';
+  const VERSION = '0.2.4';
   const FRAME_MESSAGE = '__KCS_SAFETY_FRAME_API__';
+  const SCREENSHOT_REQUEST = '__KCS_SAFETY_SCREENSHOT_REQUEST__';
+  const SCREENSHOT_RESULT = '__KCS_SAFETY_SCREENSHOT_RESULT__';
+  const DAMAGE_CONTROL_MASTER_IDS = new Set([42, 43]);
   const GUARD_STORAGE_KEY = '__KCS_SAFETY_GUARD_V1__';
   const GUARD_DEFAULT = { cx: 0.32, cy: 0.53, w: 0.48, h: 0.74 };
   const GAME_ASPECT = 1200 / 720;
@@ -42,14 +45,17 @@
   }
 
   const S = {
-    masterShips: new Map(), ships: new Map(), decks: new Map(),
+    masterShips: new Map(), masterSlotitems: new Map(),
+    ships: new Map(), slotItems: new Map(), decks: new Map(),
     combined: 0, sortieDeck: 1,
     fleet1: [], fleet2: [], hpAfter: new Map(),
     uncertain: false, uncertainReason: '', choice: false,
     planeLoss: null, ui: null, guard: null,
     guardActive: false, guardPreview: false, guardPreviewTimer: null,
+    guardDismissed: false,
     lastGameRect: null,
     taps: [], apiCount: 0, lastApi: '',
+    screenshotFile: null, screenshotStatus: '',
   };
 
   const parse = text => {
@@ -71,6 +77,8 @@
   window.addEventListener('message', e => {
     const d = e?.data?.[FRAME_MESSAGE];
     if (d && String(d.url || '').includes('/kcsapi/')) onApi(d);
+    const shot = e?.data?.[SCREENSHOT_RESULT];
+    if (shot) onScreenshotResult(shot);
   });
   bootUi();
 
@@ -83,11 +91,12 @@
     try {
       if (p.includes('/api_start2/getData')) {
         for (const m of data?.api_mst_ship || []) if (m?.api_id > 0) S.masterShips.set(m.api_id, m);
+        for (const m of data?.api_mst_slotitem || []) if (m?.api_id > 0) S.masterSlotitems.set(m.api_id, m);
       } else if (p.endsWith('/api_port/port')) {
         ingestShips(data?.api_ship || []);
         ingestDecks(data?.api_deck_port || []);
         if (Number.isFinite(data?.api_combined_flag)) S.combined = data.api_combined_flag;
-        S.hpAfter.clear(); S.uncertain = false; S.choice = false;
+        S.hpAfter.clear(); S.uncertain = false; S.choice = false; S.guardDismissed = false;
         refreshFleets(); hideGuard();
       } else if (p.includes('/api_get_member/ship_deck') || p.includes('/api_get_member/ship2') || p.includes('/api_get_member/ship3')) {
         ingestShips(Array.isArray(data) ? data : data?.api_ship_data || data?.api_ship || []);
@@ -96,18 +105,22 @@
       } else if (p.includes('/api_get_member/deck')) {
         ingestDecks(Array.isArray(data) ? data : data?.api_deck_data || []);
         refreshFleets();
+      } else if (p.includes('/api_get_member/slot_item')) {
+        ingestSlotItems(Array.isArray(data) ? data : data?.api_slot_item || []);
+      } else if (p.includes('/api_get_member/require_info')) {
+        ingestSlotItems(data?.api_slot_item || []);
       } else if (p.endsWith('/api_req_map/start')) {
         S.sortieDeck = Number(params(d.body).get('api_deck_id') || 1);
-        S.hpAfter.clear(); S.uncertain = false; S.choice = false;
+        S.hpAfter.clear(); S.uncertain = false; S.choice = false; S.guardDismissed = false;
         refreshFleets(); hideGuard();
       } else if (p.endsWith('/api_req_map/next')) {
-        S.choice = false; S.taps = []; hideGuard();
+        S.choice = false; S.taps = []; S.guardDismissed = false; hideGuard();
       } else if (isBattle(p)) {
         readBattle(p, data);
       } else if (p.endsWith('/battleresult')) {
         battleResult();
       } else if (p.includes('/goback_port')) {
-        S.choice = false; S.hpAfter.clear(); S.uncertain = false; hideGuard();
+        S.choice = false; S.hpAfter.clear(); S.uncertain = false; S.guardDismissed = false; hideGuard();
       }
       render();
     } catch (err) {
@@ -123,6 +136,10 @@
   function ingestDecks(list) {
     if (!Array.isArray(list)) return;
     for (const x of list) if (x?.api_id > 0) S.decks.set(x.api_id, x);
+  }
+  function ingestSlotItems(list) {
+    if (!Array.isArray(list)) return;
+    for (const x of list) if (x?.api_id > 0) S.slotItems.set(x.api_id, x);
   }
   function fleetIds(deckId) {
     return deckIds(S.decks.get(Number(deckId))?.api_ship);
@@ -197,7 +214,9 @@
       cond: Number.isFinite(x?.api_cond) ? x.api_cond : null,
       fuel: x?.api_fuel ?? '?',
       ammo: x?.api_bull ?? '?',
-      onslot: Array.isArray(x?.api_onslot) ? x.api_onslot : []
+      onslot: Array.isArray(x?.api_onslot) ? x.api_onslot : [],
+      slots: Array.isArray(x?.api_slot) ? x.api_slot : [],
+      slotEx: Number(x?.api_slot_ex || 0),
     };
   }
   function hp(id) {
@@ -222,13 +241,40 @@
     if (c >= 20) return { text:`🟠 ${c}`, cls:'cond-orange' };
     return { text:`🔴 ${c}`, cls:'cond-red' };
   }
+  function damageControlNames(id) {
+    const x = S.ships.get(id);
+    if (!x) return [];
+    const instanceIds = [
+      ...(Array.isArray(x.api_slot) ? x.api_slot : []),
+      Number(x.api_slot_ex || 0),
+    ].filter(v => Number(v) > 0);
+    const names = [];
+    for (const instanceId of instanceIds) {
+      const item = S.slotItems.get(Number(instanceId));
+      const masterId = Number(item?.api_slotitem_id || 0);
+      const masterName = String(S.masterSlotitems.get(masterId)?.api_name || '');
+      if (DAMAGE_CONTROL_MASTER_IDS.has(masterId) || /応急修理(要員|女神)/.test(masterName)) {
+        names.push(masterName || (masterId === 43 ? '応急修理女神' : '応急修理要員'));
+      }
+    }
+    return names;
+  }
+  function hasDamageControl(id) {
+    return damageControlNames(id).length > 0;
+  }
   function heavies() {
-    return [...S.fleet1, ...S.fleet2].filter(id => damage(hp(id))[1] === 'danger').map(id => ({ ...ship(id), hp:hp(id) }));
+    return [...S.fleet1, ...S.fleet2]
+      .filter(id => damage(hp(id))[1] === 'danger')
+      .map(id => ({ ...ship(id), hp:hp(id), damageControls:damageControlNames(id) }));
+  }
+  function blockingHeavies() {
+    return heavies().filter(x => !x.damageControls?.length);
   }
 
   function battleResult() {
     S.choice = true;
-    const bad = heavies();
+    S.guardDismissed = false;
+    const bad = blockingHeavies();
     if (bad.length || S.uncertain) showGuard(bad);
     else hideGuard();
     // 状態パネルは自動で開かない。必要なときだけ右上の状態ボタンから開く。
@@ -291,8 +337,14 @@ tr.unknown{background:#463e55}
     <b>🚧 進撃ブロッカー</b>
     <div class="rangeRow"><span>横</span><input id="guardW" type="range" min="20" max="100" step="1" value="${Math.round(GUARD.w * 100)}"><strong id="guardWVal"></strong></div>
     <div class="rangeRow"><span>縦</span><input id="guardH" type="range" min="20" max="100" step="1" value="${Math.round(GUARD.h * 100)}"><strong id="guardHVal"></strong></div>
-    <div class="guardBtns"><button class="btn" id="guardTest">サイズ確認</button><button class="btn" id="guardReset">初期サイズ</button></div>
+        <div class="guardBtns">
+      <button class="btn" id="guardTest">サイズ確認</button>
+      <button class="btn" id="guardReset">初期サイズ</button>
+      <button class="btn" id="guardDismiss">ブロッカーを消す</button>
+      <button class="btn" id="screenshot">📸 ゲーム画面スクショ</button>
+    </div>
     <div class="guardMeta" id="guardMeta">ゲーム画面を検出中…</div>
+    <div class="guardMeta" id="screenshotStatus"></div>
   </div>
   <div class="tabs">
     <button class="btn on" data-fleet="1">第1</button>
@@ -321,6 +373,11 @@ tr.unknown{background:#463e55}
       Object.assign(GUARD, GUARD_DEFAULT); saveGuard(); updateGuardSettingsUi(); positionGuard();
     };
     q('#guardTest').onclick = () => previewGuard();
+    q('#guardDismiss').onclick = () => dismissGuard();
+    q('#screenshot').onclick = () => {
+      if (S.screenshotFile) shareOrDownloadScreenshot();
+      else requestScreenshot();
+    };
     for (const b of root.querySelectorAll('[data-fleet]')) {
       b.onclick = () => {
         tab = Number(b.dataset.fleet || 1);
@@ -339,7 +396,8 @@ tr.unknown{background:#463e55}
   }
   function render() {
     if (!S.ui) return;
-    const q = x => S.ui.querySelector(x), bad = heavies();
+    const q = x => S.ui.querySelector(x), bad = heavies(), blocking = blockingHeavies();
+    const protectedBad = bad.filter(x => x.damageControls?.length);
     const chip = q('#chip');
     chip.textContent = bad.length ? `🚨 大破 ${bad.length}` : S.uncertain ? '⚠️ 判定不明' : S.apiCount ? '⚓ 状態' : '⚓ 待機';
     chip.classList.toggle('heavy-alert', bad.length > 0);
@@ -347,10 +405,12 @@ tr.unknown{background:#463e55}
     chip.style.color = bad.length ? '' : '#fff';
     q('#debug').innerHTML = `<div class="note">🔧 v${VERSION} / API ${S.apiCount}${S.lastApi?` / 最終: ${esc(S.lastApi)}`:''}<br><span class="muted">軽量モード：通信監視はBridgeだけで実行。</span></div>`;
     q('#summary').innerHTML =
-      (bad.length?`<div class="note red">🚨 大破：${bad.map(x=>esc(x.name)).join(' / ')}<br>進撃系ゾーンをロック中。</div>`:'') +
+      (blocking.length?`<div class="note red">🚨 ブロック対象大破：${blocking.map(x=>esc(x.name)).join(' / ')}<br>ダメコン未装備のため進撃系ゾーンをロック中。</div>`:'') +
+      (protectedBad.length?`<div class="note yellow">🛟 ダメコン装備大破：${protectedBad.map(x=>`${esc(x.name)}（${esc(x.damageControls.join(' / '))}）`).join('<br>')}<br>この艦だけが大破ならブロッカーは出しません。</div>`:'') +
       (S.uncertain?`<div class="note yellow">⚠️ HP判定不明：${esc(S.uncertainReason)}</div>`:'') +
       `<div class="note">HPの <b>*</b> は戦闘APIからの戦闘後計算値。燃料・弾薬・搭載数・Condは最終取得値です。Cond：50以上=キラ / 40〜49=通常 / 30〜39=軽疲労 / 20〜29=橙 / 0〜19=赤。</div>`;
     updateGuardSettingsUi();
+    if (q('#screenshotStatus')) q('#screenshotStatus').textContent = S.screenshotStatus || '';
     renderFleet(S.ui.__tab());
     q('#planes').innerHTML = S.planeLoss ? `<div class="note">✈️ 直近航空戦：総搭載 ${S.planeLoss.before} / 総損失 ${S.planeLoss.lost}</div>` : '';
   }
@@ -376,7 +436,8 @@ tr.unknown{background:#463e55}
     }
     const rows = ids.map(id => {
       const x = ship(id), h = hp(id), [label, cls] = damage(h), ci = condInfo(x.cond);
-      return `<tr class="${cls}"><td>${label}</td><td class="name">${esc(x.name)} Lv${x.lv}</td><td>${h?`${h.now}/${h.max}${h.source==='battle'?'*':''}`:'?'}</td><td class="cond ${ci.cls}">${ci.text}</td><td>${x.fuel}</td><td>${x.ammo}</td><td>${x.onslot.length?x.onslot.join('/'):'-'}</td></tr>`;
+      const dc = damageControlNames(id);
+      return `<tr class="${cls}"><td>${label}${dc.length?' 🛟':''}</td><td class="name">${esc(x.name)} Lv${x.lv}</td><td>${h?`${h.now}/${h.max}${h.source==='battle'?'*':''}`:'?'}</td><td class="cond ${ci.cls}">${ci.text}</td><td>${x.fuel}</td><td>${x.ammo}</td><td>${x.onslot.length?x.onslot.join('/'):'-'}</td></tr>`;
     }).join('');
     box.innerHTML = `<div class="note">第${tab}艦隊${Number(tab) === Number(S.sortieDeck) ? '（出撃艦隊）' : ''}</div><div class="tablewrap"><table><thead><tr><th>状態</th><th>艦</th><th>HP</th><th>Cond</th><th>燃</th><th>弾</th><th>搭載</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
@@ -427,10 +488,14 @@ tr.unknown{background:#463e55}
     if (S.guard?.isConnected) return S.guard;
     const g = document.createElement('div');
     g.style.cssText = 'position:fixed;z-index:2147483646;display:none;align-items:center;justify-content:center;text-align:center;background:rgba(180,0,25,.88);border:4px solid #ff9cab;border-radius:16px;color:white;font:900 clamp(12px,2.5vw,24px)/1.35 -apple-system,BlinkMacSystemFont,sans-serif;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;overflow:hidden';
-    const stop = e => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation?.(); };
-    g.addEventListener('touchstart', e => { stop(e); if (!S.guardPreview) guardTap(); }, { passive:false, capture:true });
+    const isGuardControl = e => !!e.target?.closest?.('[data-guard-control]');
+    const stop = e => {
+      if (isGuardControl(e)) return;
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation?.();
+    };
+    g.addEventListener('touchstart', e => { if (isGuardControl(e)) return; stop(e); if (!S.guardPreview) guardTap(); }, { passive:false, capture:true });
     g.addEventListener('touchend', stop, { passive:false, capture:true });
-    g.addEventListener('pointerdown', e => { stop(e); if (!S.guardPreview && e.pointerType !== 'touch') guardTap(); }, { passive:false, capture:true });
+    g.addEventListener('pointerdown', e => { if (isGuardControl(e)) return; stop(e); if (!S.guardPreview && e.pointerType !== 'touch') guardTap(); }, { passive:false, capture:true });
     g.addEventListener('pointerup', stop, { passive:false, capture:true });
     g.addEventListener('click', stop, true);
     document.documentElement.appendChild(g);
@@ -445,6 +510,7 @@ tr.unknown{background:#463e55}
     return g;
   }
   function showGuard(bad) {
+    if (S.guardDismissed && !S.guardPreview) return;
     const g = ensureGuard();
     if (S.guardPreviewTimer) clearTimeout(S.guardPreviewTimer);
     S.guardPreview = false;
@@ -452,7 +518,11 @@ tr.unknown{background:#463e55}
     S.taps = [];
     g.style.pointerEvents = 'auto';
     g.style.background = 'rgba(180,0,25,.88)';
-    g.innerHTML = `<div>🚨 ${bad.length?'大破艦あり':'HP判定不明'}<br><small>進撃系ボタンをロック中</small><br><small>進撃するなら赤枠を3連続タップ</small><br><span id="gc">0 / 3</span></div>`;
+    g.innerHTML = `<div>🚨 ${bad.length?'ダメコンなし大破艦あり':'HP判定不明'}<br><small>進撃系ボタンをロック中</small><br><small>進撃するなら赤枠を3連続タップ</small><br><span id="gc">0 / 3</span><br><button data-guard-control="1" id="guardDismissOverlay" style="margin-top:10px;border:2px solid #fff;border-radius:10px;background:#24262d;color:#fff;padding:10px 14px;font:800 13px -apple-system,BlinkMacSystemFont,sans-serif">ブロッカーを消す</button></div>`;
+    g.querySelector('#guardDismissOverlay')?.addEventListener('click', e => {
+      e.preventDefault(); e.stopPropagation();
+      dismissGuard();
+    });
     g.style.display = 'flex';
     positionGuard();
   }
@@ -469,9 +539,15 @@ tr.unknown{background:#463e55}
     S.guardPreviewTimer = setTimeout(() => {
       S.guardPreview = false;
       S.guardPreviewTimer = null;
-      if (S.choice && (heavies().length || S.uncertain)) showGuard(heavies());
+      if (S.choice && (blockingHeavies().length || S.uncertain)) showGuard(blockingHeavies());
       else hideGuard();
     }, 4000);
+  }
+  function dismissGuard() {
+    S.guardDismissed = true;
+    hideGuard();
+    S.screenshotStatus = 'ブロッカーを手動で消しました。次の戦闘結果で判定を再開します。';
+    render();
   }
   function hideGuard() {
     if (S.guardPreviewTimer) clearTimeout(S.guardPreviewTimer);
@@ -510,9 +586,86 @@ tr.unknown{background:#463e55}
       S.guard.style.pointerEvents = 'none';
       S.guard.style.background = 'rgba(20,125,60,.76)';
       S.guard.innerHTML = '<div>一時解除中<br><small>5秒以内に実際の「進撃」をタップ</small></div>';
-      setTimeout(() => { if (S.choice) showGuard(heavies()); }, UNLOCK_MS);
+      setTimeout(() => { if (S.choice) showGuard(blockingHeavies()); }, UNLOCK_MS);
     }
   }
 
-  console.info(`[KCS Safety] loaded v${VERSION} (bridge-only)`);
+  function requestScreenshot() {
+    if (!S.ui) return;
+    S.screenshotFile = null;
+    S.screenshotStatus = 'ゲーム画面をキャプチャ中…';
+    const btn = S.ui.querySelector('#screenshot');
+    if (btn) btn.textContent = '📸 キャプチャ中…';
+    let sent = 0;
+    for (const frame of document.querySelectorAll('iframe')) {
+      try {
+        frame.contentWindow?.postMessage({ [SCREENSHOT_REQUEST]: { requestedAt:Date.now() } }, '*');
+        sent++;
+      } catch (_) {}
+    }
+    if (!sent) {
+      S.screenshotStatus = 'ゲームiframeが見つかりません。母港画面を表示してから再試行してください。';
+      if (btn) btn.textContent = '📸 ゲーム画面スクショ';
+    }
+    render();
+    setTimeout(() => {
+      if (!S.screenshotFile && /キャプチャ中/.test(S.screenshotStatus)) {
+        S.screenshotStatus = 'スクショ応答がありません。Bridge更新後にページを再読み込みしてください。';
+        if (btn) btn.textContent = '📸 ゲーム画面スクショ';
+        render();
+      }
+    }, 3500);
+  }
+
+  function screenshotName() {
+    const d = new Date();
+    const p = n => String(n).padStart(2, '0');
+    return `kancolle-${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.png`;
+  }
+
+  function onScreenshotResult(shot) {
+    if (!S.ui) return;
+    const btn = S.ui.querySelector('#screenshot');
+    if (!shot?.ok || !(shot.blob instanceof Blob)) {
+      S.screenshotStatus = shot?.error || 'スクショ取得に失敗しました。';
+      if (btn) btn.textContent = '📸 ゲーム画面スクショ';
+      render();
+      return;
+    }
+    S.screenshotFile = new File([shot.blob], screenshotName(), { type:'image/png' });
+    S.screenshotStatus = `スクショ準備完了（${shot.width || '?'}×${shot.height || '?'}）。もう一度ボタンを押すと保存/共有します。`;
+    if (btn) btn.textContent = '📤 スクショを保存/共有';
+    render();
+  }
+
+  async function shareOrDownloadScreenshot() {
+    const file = S.screenshotFile;
+    if (!file) return requestScreenshot();
+    try {
+      if (navigator.share && navigator.canShare?.({ files:[file] })) {
+        await navigator.share({ files:[file], title:'艦これスクショ' });
+        S.screenshotStatus = 'スクショを共有しました。';
+      } else {
+        const url = URL.createObjectURL(file);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name;
+        a.style.display = 'none';
+        document.documentElement.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+        S.screenshotStatus = 'スクショをPNGで保存しました。';
+      }
+    } catch (err) {
+      if (err?.name !== 'AbortError') S.screenshotStatus = `保存/共有に失敗: ${err?.message || err}`;
+    } finally {
+      S.screenshotFile = null;
+      const btn = S.ui?.querySelector('#screenshot');
+      if (btn) btn.textContent = '📸 ゲーム画面スクショ';
+      render();
+    }
+  }
+
+  console.info(`[KCS Safety] loaded v${VERSION} (bridge-only+damecon+screenshot)`);
 })();
