@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         艦これ Safari Safety Bridge
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      0.1.5
-// @description  艦これ本体ページ側で必要なkcsapiだけ軽量転送するBridge
+// @version      0.1.6
+// @description  艦これ本体ページ側で必要なkcsapiだけ軽量転送し、ゲーム画面スクショにも応答するBridge
 // @match        *://*.kancolle-server.com/*
 // @include      *://203.104.209.*/*
 // @include      /^https?:\/\/203\.104\.209\.\d+\//
@@ -15,6 +15,8 @@
   'use strict';
 
   const FRAME_MESSAGE = '__KCS_SAFETY_FRAME_API__';
+  const SCREENSHOT_REQUEST = '__KCS_SAFETY_SCREENSHOT_REQUEST__';
+  const SCREENSHOT_RESULT = '__KCS_SAFETY_SCREENSHOT_RESULT__';
   if (window.__KCS_SAFETY_PAGE_BRIDGE__) return;
   window.__KCS_SAFETY_PAGE_BRIDGE__ = true;
 
@@ -26,6 +28,8 @@
       u.includes('/kcsapi/api_get_member/ship2') ||
       u.includes('/kcsapi/api_get_member/ship3') ||
       u.includes('/kcsapi/api_get_member/deck') ||
+      u.includes('/kcsapi/api_get_member/slot_item') ||
+      u.includes('/kcsapi/api_get_member/require_info') ||
       u.includes('/kcsapi/api_req_map/start') ||
       u.includes('/kcsapi/api_req_map/next') ||
       /\/kcsapi\/api_req_(sortie|combined_battle|battle_midnight)\//.test(u) ||
@@ -45,9 +49,12 @@
     api_fuel:x.api_fuel,
     api_bull:x.api_bull,
     api_onslot:x.api_onslot,
+    api_slot:x.api_slot,
+    api_slot_ex:x.api_slot_ex,
     api_nowhp:x.api_nowhp,
     api_maxhp:x.api_maxhp,
   }) : x;
+  const slotLite = x => x ? ({ api_id:x.api_id, api_slotitem_id:x.api_slotitem_id }) : x;
   const deckLite = x => x ? ({ api_id:x.api_id, api_ship:x.api_ship }) : x;
   const shellLite = h => h ? ({ api_df_list:h.api_df_list, api_damage:h.api_damage, api_at_eflag:h.api_at_eflag }) : h;
 
@@ -61,7 +68,12 @@
     let out = d;
 
     if (String(url).includes('/api_start2/getData')) {
-      out = { api_mst_ship:(d?.api_mst_ship || []).map(x => ({ api_id:x.api_id, api_name:x.api_name })) };
+      out = {
+        api_mst_ship:(d?.api_mst_ship || []).map(x => ({ api_id:x.api_id, api_name:x.api_name })),
+        api_mst_slotitem:(d?.api_mst_slotitem || [])
+          .filter(x => /応急修理(要員|女神)/.test(String(x?.api_name || '')))
+          .map(x => ({ api_id:x.api_id, api_name:x.api_name })),
+      };
     } else if (String(url).includes('/api_port/port')) {
       out = {
         api_ship:(d?.api_ship || []).map(shipLite),
@@ -78,6 +90,10 @@
       else out = { api_ship:(d?.api_ship || d?.api_ship_data || []).map(shipLite) };
     } else if (String(url).includes('/api_get_member/deck')) {
       out = Array.isArray(d) ? d.map(deckLite) : { api_deck_data:(d?.api_deck_data || []).map(deckLite) };
+    } else if (String(url).includes('/api_get_member/slot_item')) {
+      out = Array.isArray(d) ? d.map(slotLite) : { api_slot_item:(d?.api_slot_item || []).map(slotLite) };
+    } else if (String(url).includes('/api_get_member/require_info')) {
+      out = { api_slot_item:(d?.api_slot_item || []).map(slotLite) };
     } else if (/\/api_req_(sortie|combined_battle|battle_midnight)\//.test(String(url)) && !String(url).includes('/battleresult')) {
       out = {
         api_f_nowhps:d?.api_f_nowhps,
@@ -119,6 +135,43 @@
     url:`${location.origin}/kcsapi/__bridge_heartbeat__`,
     body:'',
     text:'svdata={"api_result":1,"api_data":{}}'
+  });
+
+  const postScreenshot = detail => {
+    try { window.top.postMessage({ [SCREENSHOT_RESULT]: detail }, '*'); } catch (_) {}
+  };
+
+  function captureLargestCanvas() {
+    const canvases = [...document.querySelectorAll('canvas')]
+      .filter(c => Number(c.width) >= 300 && Number(c.height) >= 180)
+      .sort((a,b) => (b.width * b.height) - (a.width * a.height));
+    const canvas = canvases[0];
+    if (!canvas) {
+      postScreenshot({ ok:false, error:'ゲームcanvasが見つかりません' });
+      return;
+    }
+    try {
+      canvas.toBlob(blob => {
+        if (!blob) {
+          postScreenshot({ ok:false, error:'canvasのPNG化に失敗しました' });
+          return;
+        }
+        postScreenshot({
+          ok:true,
+          blob,
+          width:canvas.width,
+          height:canvas.height,
+          capturedAt:Date.now(),
+        });
+      }, 'image/png');
+    } catch (err) {
+      postScreenshot({ ok:false, error:`スクショ失敗: ${err?.message || err}` });
+    }
+  }
+
+  window.addEventListener('message', e => {
+    if (!e?.data?.[SCREENSHOT_REQUEST]) return;
+    captureLargestCanvas();
   });
 
   try {
@@ -164,5 +217,5 @@
     console.warn('[KCS Safety Bridge] fetch hook failed', e);
   }
 
-  console.info('[KCS Safety Bridge] loaded v0.1.5 lightweight+cond', location.href);
+  console.info('[KCS Safety Bridge] loaded v0.1.6 lightweight+cond+damecon+screenshot', location.href);
 })();
