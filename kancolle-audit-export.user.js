@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         艦これ Safari Audit Export
+// @name         艦これ Complete Passive Audit Export (Safari)
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      0.1.1
-// @description  艦これが通常操作で受信したAPIレスポンスだけを受動収集し、監査用JSONを書き出す
+// @version      0.2.0
+// @description  通常プレイで受信した艦これAPIレスポンスだけを受動収集し、取得状況付き監査JSONを書き出す
 // @match        *://*.dmm.com/*
 // @match        *://*.kancolle-server.com/*
 // @include      *://203.104.209.*/*
@@ -14,433 +14,171 @@
 
 (() => {
   'use strict';
+  const VERSION='0.2.0', FLAVOR='Safari', MESSAGE='__KCS_COMPLETE_AUDIT_V2__';
+  const GAME_HOST=/(^|\.)kancolle-server\.com$/i.test(location.hostname)||/^203\.104\.209\.\d+$/.test(location.hostname);
+  const DMM_TOP=/(^|\.)dmm\.com$/i.test(location.hostname)&&window.top===window;
 
-  const VERSION = '0.1.1';
-  const MESSAGE = '__KCS_AUDIT_FRAME_API__';
-  const GAME_HOST = /(^|\.)kancolle-server\.com$/i.test(location.hostname) || /^203\.104\.209\.\d+$/.test(location.hostname);
-  const DMM_TOP = /(^|\.)dmm\.com$/i.test(location.hostname) && window.top === window;
+  // SAFETY: 独自のXHR/fetchを一切発行しない。ゲーム本体が通常操作で受信した
+  // レスポンスだけを読む。request body / api_token / Cookie は保存・転送しない。
+  if(GAME_HOST) installObserver();
+  if(DMM_TOP) installCollector();
 
-  // 重要: このスクリプトは艦これサーバーへ独自リクエストを一切送らない。
-  // ゲーム本体が通常操作で発行した XHR/fetch の「レスポンスを読むだけ」。
-  // request body / api_token は保存・転送しない。
-
-  if (GAME_HOST) installPassiveBridge();
-  if (DMM_TOP) installExporter();
-
-  function auditKey(url) {
-    const u = String(url || '');
-    if (u.includes('/kcsapi/api_start2/getData')) return 'start2';
-    if (u.includes('/kcsapi/api_port/port')) return 'port';
-    if (u.includes('/kcsapi/api_get_member/ship_deck')) return 'ship_deck';
-    if (u.includes('/kcsapi/api_get_member/ship2')) return 'ship2';
-    if (u.includes('/kcsapi/api_get_member/ship3')) return 'ship3';
-    if (u.includes('/kcsapi/api_get_member/slot_item')) return 'slot_item';
-    if (u.includes('/kcsapi/api_get_member/require_info')) return 'require_info';
-    if (u.includes('/kcsapi/api_get_member/basic')) return 'basic';
-    if (u.includes('/kcsapi/api_get_member/material')) return 'material';
-    if (u.includes('/kcsapi/api_get_member/useitem')) return 'useitem';
-    if (u.includes('/kcsapi/api_get_member/deck')) return 'deck';
-    if (u.includes('/kcsapi/api_get_member/ndock')) return 'ndock';
-    if (u.includes('/kcsapi/api_get_member/mission')) return 'mission';
-    if (u.includes('/kcsapi/api_get_member/mapinfo')) return 'mapinfo';
-    if (u.includes('/kcsapi/api_get_member/questlist')) return 'questlist';
-    if (u.includes('/kcsapi/api_get_member/base_air_corps')) return 'air_bases';
-    return '';
+  function wantedPath(url){
+    try{
+      const p=new URL(String(url||''),location.href).pathname;
+      if(!p.startsWith('/kcsapi/')) return '';
+      if(p==='/kcsapi/api_start2/getData'||p==='/kcsapi/api_port/port') return p;
+      if(p.startsWith('/kcsapi/api_get_member/')) return p;
+      if(p.startsWith('/kcsapi/api_req_air_corps/')) return p;
+      if(p==='/kcsapi/api_req_hokyu/charge') return p;
+      return '';
+    }catch(_){return '';}
   }
 
-  function installPassiveBridge() {
-    if (window.__KCS_AUDIT_PASSIVE_BRIDGE__) return;
-    window.__KCS_AUDIT_PASSIVE_BRIDGE__ = true;
-
-    const parse = raw => {
-      try { return JSON.parse(String(raw || '').replace(/^svdata=/, '')); }
-      catch (_) { return null; }
+  function installObserver(){
+    if(window.__KCS_COMPLETE_AUDIT_OBSERVER__) return;
+    window.__KCS_COMPLETE_AUDIT_OBSERVER__=true;
+    const parse=raw=>{try{return JSON.parse(String(raw||'').replace(/^svdata=/,''));}catch(_){return null;}};
+    const emit=(url,raw)=>{
+      const path=wantedPath(url); if(!path) return;
+      const json=parse(raw); if(!json||Number(json.api_result)!==1) return;
+      try{window.top.postMessage({[MESSAGE]:{path,captured_at:new Date().toISOString(),data:json.api_data}},'*');}catch(_){}
     };
-
-    const emit = (url, raw) => {
-      const key = auditKey(url);
-      if (!key) return;
-      const json = parse(raw);
-      if (!json || json.api_result !== 1) return;
-      let path = '';
-      try { path = new URL(String(url), location.href).pathname; } catch (_) {}
-      try {
-        window.top.postMessage({
-          [MESSAGE]: {
-            key,
-            path,
-            captured_at: new Date().toISOString(),
-            data: json.api_data,
-          }
-        }, '*');
-      } catch (_) {}
-    };
-
-    try {
-      const originalOpen = XMLHttpRequest.prototype.open;
-      const originalSend = XMLHttpRequest.prototype.send;
-
-      XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-        this.__kcsAuditUrl = url;
-        return originalOpen.call(this, method, url, ...rest);
+    try{
+      const open=XMLHttpRequest.prototype.open, send=XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open=function(method,url,...rest){this.__kcsAuditUrl=url;return open.call(this,method,url,...rest);};
+      XMLHttpRequest.prototype.send=function(body){
+        const url=this.__kcsAuditUrl;
+        if(wantedPath(url)) this.addEventListener('load',()=>{try{
+          let text='';
+          if(!this.responseType||this.responseType==='text') text=this.responseText||'';
+          else if(this.responseType==='json') text=JSON.stringify(this.response||{});
+          emit(url,text);
+        }catch(_){}},{once:true});
+        return send.call(this,body);
       };
-
-      XMLHttpRequest.prototype.send = function(body) {
-        const url = this.__kcsAuditUrl;
-        if (auditKey(url)) {
-          this.addEventListener('load', () => {
-            try {
-              let text = '';
-              if (!this.responseType || this.responseType === 'text') text = this.responseText || '';
-              else if (this.responseType === 'json') text = JSON.stringify(this.response || {});
-              emit(url, text);
-            } catch (_) {}
-          }, { once: true });
-        }
-        return originalSend.call(this, body);
-      };
-    } catch (err) {
-      console.warn('[KCS Audit] XHR observer install failed', err);
-    }
-
-    try {
-      if (window.fetch) {
-        const originalFetch = window.fetch;
-        window.fetch = async function(input, init) {
-          const response = await originalFetch.apply(this, arguments);
-          try {
-            const url = typeof input === 'string' ? input : input?.url;
-            if (auditKey(url)) {
-              response.clone().text().then(text => emit(url, text)).catch(() => {});
-            }
-          } catch (_) {}
-          return response;
+    }catch(e){console.warn('[KCS Audit] XHR observer failed',e);}
+    try{
+      if(window.fetch){
+        const f=window.fetch;
+        window.fetch=async function(input,init){
+          const r=await f.apply(this,arguments);
+          try{const url=typeof input==='string'?input:input?.url;if(wantedPath(url)) r.clone().text().then(t=>emit(url,t)).catch(()=>{});}catch(_){}
+          return r;
         };
       }
-    } catch (err) {
-      console.warn('[KCS Audit] fetch observer install failed', err);
-    }
-
-    console.info(`[KCS Audit] passive bridge loaded v${VERSION}`);
+    }catch(e){console.warn('[KCS Audit] fetch observer failed',e);}
+    console.info(`[KCS Audit] ${FLAVOR} passive observer v${VERSION}`);
   }
 
-  function installExporter() {
-    if (window.__KCS_AUDIT_EXPORTER__) return;
-    window.__KCS_AUDIT_EXPORTER__ = true;
+  function installCollector(){
+    if(window.__KCS_COMPLETE_AUDIT_COLLECTOR__) return;
+    window.__KCS_COMPLETE_AUDIT_COLLECTOR__=true;
+    const byPath=new Map(), capturedAt=new Map(), quests=new Map(), questPages=new Set(), airBases=new Map(), airExpanded=new Map();
+    let questMeta={count:0,page_count:0,disp_page:0,exec_count:0}, host=null;
+    const arr=v=>Array.isArray(v)?v:[];
+    const trusted=origin=>{try{const h=new URL(origin).hostname;return /(^|\.)kancolle-server\.com$/i.test(h)||/^203\.104\.209\.\d+$/.test(h);}catch(_){return false;}};
+    const get=s=>byPath.get(`/kcsapi/${s}`), has=s=>byPath.has(`/kcsapi/${s}`);
 
-    const KEYS = [
-      'start2','port','ship2','ship3','ship_deck','slot_item','require_info','basic',
-      'material','useitem','deck','ndock','mission','mapinfo','questlist','air_bases'
-    ];
-    const latest = Object.create(null);
-    const times = Object.create(null);
-    const quests = new Map();
-    let questMeta = { count: 0, page_count: 0, disp_page: 0, exec_count: 0 };
-    let standaloneHost = null;
-
-    const trustedOrigin = origin => {
-      try {
-        const h = new URL(origin).hostname;
-        return /(^|\.)kancolle-server\.com$/i.test(h) || /^203\.104\.209\.\d+$/.test(h);
-      } catch (_) { return false; }
-    };
-
-    window.addEventListener('message', event => {
-      const payload = event?.data?.[MESSAGE];
-      if (!payload || !trustedOrigin(event.origin)) return;
-      const key = String(payload.key || '');
-      if (!KEYS.includes(key)) return;
-
-      if (key === 'questlist') mergeQuestPage(payload.data);
-      latest[key] = payload.data;
-      times[key] = payload.captured_at || new Date().toISOString();
-      renderUi();
+    window.addEventListener('message',e=>{
+      const p=e?.data?.[MESSAGE]; if(!p||!trusted(e.origin)||!String(p.path||'').startsWith('/kcsapi/')) return;
+      const path=String(p.path); byPath.set(path,p.data); capturedAt.set(path,p.captured_at||new Date().toISOString());
+      if(path.endsWith('/questlist')) mergeQuest(p.data);
+      if(path.endsWith('/base_air_corps')||path.startsWith('/kcsapi/api_req_air_corps/')) mergeBases(p.data);
+      if(path.endsWith('/mapinfo')) mergeExpanded(p.data);
+      render();
     });
 
-    function mergeQuestPage(data) {
-      const list = Array.isArray(data?.api_list) ? data.api_list : [];
-      for (const q of list) {
-        if (!q || Number(q.api_no) <= 0) continue;
-        quests.set(Number(q.api_no), normalizeQuest(q));
-      }
-      questMeta = {
-        count: Number(data?.api_count || questMeta.count || quests.size),
-        page_count: Number(data?.api_page_count || questMeta.page_count || 0),
-        disp_page: Number(data?.api_disp_page || questMeta.disp_page || 0),
-        exec_count: Number(data?.api_exec_count || questMeta.exec_count || 0),
-      };
+    function mergeQuest(d){
+      const page=Number(d?.api_disp_page||0); if(page>0) questPages.add(page);
+      for(const q of arr(d?.api_list)) if(q&&Number(q.api_no)>0) quests.set(Number(q.api_no),{
+        id:Number(q.api_no||0),title:q.api_title||'',detail:q.api_detail||'',category:Number(q.api_category||0),type:Number(q.api_type||0),
+        label_type:Number(q.api_label_type||0),state:Number(q.api_state||0),progress:Number(q.api_progress_flag||0),bonus_flag:Number(q.api_bonus_flag||0),
+        invalid_flag:Number(q.api_invalid_flag||0),reward_material:arr(q.api_get_material)
+      });
+      questMeta={count:Number(d?.api_count||questMeta.count||quests.size),page_count:Number(d?.api_page_count||questMeta.page_count||0),disp_page:page||questMeta.disp_page,exec_count:Number(d?.api_exec_count||questMeta.exec_count||0)};
+    }
+    function baseList(d){
+      if(Array.isArray(d)) return d;
+      if(Array.isArray(d?.api_base_air_corps)) return d.api_base_air_corps;
+      if(Array.isArray(d?.api_air_base_corps)) return d.api_air_base_corps;
+      if(Array.isArray(d?.api_list)) return d.api_list;
+      if(d&&typeof d==='object'&&(d.api_area_id||d.api_rid)&&d.api_plane_info) return [d];
+      return [];
+    }
+    function baseKey(b,i){return `${Number(b?.api_area_id||b?.api_maparea_id||0)}:${Number(b?.api_rid||b?.api_id||i+1)}`;}
+    function mergeBases(d){baseList(d).forEach((b,i)=>airBases.set(baseKey(b,i),b));}
+    function mergeExpanded(d){arr(d?.api_air_base_expanded_info).forEach((x,i)=>airExpanded.set(`${Number(x?.api_area_id||x?.api_maparea_id||0)}:${Number(x?.api_rid||x?.api_id||i+1)}`,x));}
+
+    function ships(){
+      const sd=get('api_get_member/ship_deck');
+      if(arr(sd?.api_ship_data).length) return sd.api_ship_data;if(arr(sd?.api_ship).length) return sd.api_ship;
+      const s3=get('api_get_member/ship3');if(Array.isArray(s3)) return s3;if(arr(s3?.api_ship).length) return s3.api_ship;
+      const s2=get('api_get_member/ship2');if(Array.isArray(s2)) return s2;if(arr(s2?.api_ship).length) return s2.api_ship;
+      return arr(get('api_port/port')?.api_ship);
+    }
+    function decks(){
+      const sd=get('api_get_member/ship_deck');if(arr(sd?.api_deck_data).length) return sd.api_deck_data;if(arr(sd?.api_deck_port).length) return sd.api_deck_port;
+      const d=get('api_get_member/deck');if(Array.isArray(d)) return d;if(arr(d?.api_deck_data).length) return d.api_deck_data;
+      return arr(get('api_port/port')?.api_deck_port);
+    }
+    function maps(){const d=get('api_get_member/mapinfo');return Array.isArray(d)?d:arr(d?.api_map_info||d?.api_mapinfo);}
+
+    function coverage(){
+      const port=get('api_port/port'), req=get('api_get_member/require_info'), pages=Number(questMeta.page_count||0);
+      return [
+        ['master','マスター',has('api_start2/getData')],['port','母港',!!port],['profile','提督',has('api_get_member/basic')||!!port?.api_basic||!!req?.api_basic],
+        ['ships','艦娘',ships().length>0],['equipment','装備',has('api_get_member/slot_item')||arr(req?.api_slot_item).length>0],['decks','艦隊',decks().length>0],
+        ['material','資源',has('api_get_member/material')||arr(port?.api_material).length>0],['useitems','アイテム',has('api_get_member/useitem')||arr(req?.api_useitem).length>0],
+        ['ndocks','入渠',has('api_get_member/ndock')||arr(port?.api_ndock).length>0],['kdocks','建造',has('api_get_member/kdock')||arr(req?.api_kdock).length>0],
+        ['missions','遠征',has('api_get_member/mission')],['quests','任務全頁',pages>0&&questPages.size>=pages],['maps','海域',has('api_get_member/mapinfo')],['air_bases','基地航空隊',airBases.size>0]
+      ].map(([id,label,ok])=>({id,label,ok}));
     }
 
-    function normalizeQuest(q) {
+    function build(){
+      const start=get('api_start2/getData')||{}, port=get('api_port/port')||{}, req=get('api_get_member/require_info')||{};
+      const s=ships(), d=decks(), m=maps();
+      const slots=Array.isArray(get('api_get_member/slot_item'))?get('api_get_member/slot_item'):arr(req?.api_slot_item);
+      const nd=Array.isArray(get('api_get_member/ndock'))?get('api_get_member/ndock'):arr(port?.api_ndock);
+      const kd=Array.isArray(get('api_get_member/kdock'))?get('api_get_member/kdock'):arr(req?.api_kdock);
+      const mat=Array.isArray(get('api_get_member/material'))?get('api_get_member/material'):arr(port?.api_material);
+      const items=Array.isArray(get('api_get_member/useitem'))?get('api_get_member/useitem'):arr(req?.api_useitem);
+      const basic=get('api_get_member/basic')||port?.api_basic||req?.api_basic||{}, missions=get('api_get_member/mission')||{};
+      const q=[...quests.values()].sort((a,b)=>a.id-b.id), bases=[...airBases.values()], checks=coverage();
+      const raw={};for(const [p,v] of byPath) if(p.startsWith('/kcsapi/api_get_member/')) raw[p.replace('/kcsapi/api_get_member/','')]=v;
       return {
-        id: Number(q.api_no || 0),
-        title: q.api_title || '',
-        detail: q.api_detail || '',
-        category: Number(q.api_category || 0),
-        type: Number(q.api_type || 0),
-        label_type: Number(q.api_label_type || 0),
-        state: Number(q.api_state || 0),
-        progress: Number(q.api_progress_flag || 0),
-        bonus_flag: Number(q.api_bonus_flag || 0),
-        invalid_flag: Number(q.api_invalid_flag || 0),
-        reward_material: Array.isArray(q.api_get_material) ? q.api_get_material : [],
+        generated_at:new Date().toISOString(),
+        meta:{source:`kancolle complete audit (${FLAVOR} passive export)`,script_version:VERSION,passive_only:true,api_token_saved:false,request_body_saved:false,note:'No extra requests are generated. Only responses from normal game operations are observed.'},
+        status:{ships:s.length,equipment:slots.length,quests:q.length,air_bases:bases.length,maps:m.length,errors:0,coverage_done:checks.filter(x=>x.ok).length,coverage_total:checks.length},
+        coverage:checks,
+        master:{ships:arr(start.api_mst_ship),ship_graph:arr(start.api_mst_shipgraph),slotitems:arr(start.api_mst_slotitem),slotitem_equiptype:arr(start.api_mst_slotitem_equiptype),stypes:arr(start.api_mst_stype),useitems:arr(start.api_mst_useitem),missions:arr(start.api_mst_mission),mapareas:arr(start.api_mst_maparea),mapinfo:arr(start.api_mst_mapinfo),furniture:arr(start.api_mst_furniture),equip_exslot:arr(start.api_mst_equip_exslot),equip_exslot_ship:start.api_mst_equip_exslot_ship||{}},
+        member:{ships:s,slot_items:slots,decks:d,ndocks:nd,kdocks:kd,material:mat,useitems:items,basic,missions,mapinfo:m,air_bases:bases,air_base_expanded_info:[...airExpanded.values()],require_info:req,quest_meta:{...questMeta,captured:q.length,pages_captured:[...questPages].sort((a,b)=>a-b)},raw_get_member:raw},
+        quests:q,captures:Object.fromEntries([...byPath.keys()].sort().map(p=>[p,true])),captured_at:Object.fromEntries([...capturedAt.entries()].sort(([a],[b])=>a.localeCompare(b))),errors:[]
       };
     }
 
-    function asArray(v) {
-      return Array.isArray(v) ? v : [];
+    function stamp(){const d=new Date(),p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;}
+    function file(){return new File([JSON.stringify(build(),null,2)],`kancolle_final_audit_${stamp()}.json`,{type:'application/json'});}
+    function download(){const f=file(),u=URL.createObjectURL(f),a=document.createElement('a');a.href=u;a.download=f.name;a.style.display='none';document.documentElement.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),30000);}
+    async function share(){const f=file();try{if(navigator.canShare?.({files:[f]})&&navigator.share) await navigator.share({files:[f],title:'艦これ Audit JSON'});else download();}catch(e){if(e?.name!=='AbortError') download();}}
+    function guide(){
+      const miss=coverage().filter(x=>!x.ok).map(x=>x.id), g=[];
+      if(!miss.length) return '主要項目取得済み。基地は表示した方面ごとに蓄積します。';
+      if(miss.includes('master')||miss.includes('port')) g.push('再読込→母港');
+      if(miss.some(x=>['ships','equipment','decks'].includes(x))) g.push('編成→改装/装備');
+      if(miss.includes('ndocks')) g.push('入渠');if(miss.includes('kdocks')) g.push('工廠');if(miss.includes('missions')) g.push('遠征');
+      if(miss.includes('quests')) g.push(`任務全ページ(${questPages.size}/${questMeta.page_count||'?'})`);
+      if(miss.includes('maps')) g.push('出撃→海域選択');if(miss.includes('air_bases')) g.push('基地航空隊のある各方面→基地画面');
+      return g.join(' → ');
     }
-
-    function latestShips() {
-      const sd = latest.ship_deck;
-      if (Array.isArray(sd?.api_ship_data) && sd.api_ship_data.length) return sd.api_ship_data;
-      if (Array.isArray(sd?.api_ship) && sd.api_ship.length) return sd.api_ship;
-      if (Array.isArray(latest.ship3) && latest.ship3.length) return latest.ship3;
-      if (Array.isArray(latest.ship3?.api_ship) && latest.ship3.api_ship.length) return latest.ship3.api_ship;
-      if (Array.isArray(latest.ship2) && latest.ship2.length) return latest.ship2;
-      if (Array.isArray(latest.ship2?.api_ship) && latest.ship2.api_ship.length) return latest.ship2.api_ship;
-      return asArray(latest.port?.api_ship);
+    function render(){
+      if(!document.documentElement) return;
+      if(!host){host=document.createElement('div');host.id='kcs-complete-audit-v2';host.style.cssText='position:fixed;right:12px;bottom:12px;z-index:2147483647;font:12px -apple-system,BlinkMacSystemFont,sans-serif;color:#fff;background:rgba(18,22,28,.94);border:1px solid rgba(255,255,255,.22);border-radius:10px;padding:10px;width:min(390px,calc(100vw - 44px));box-shadow:0 4px 18px rgba(0,0,0,.35)';(document.body||document.documentElement).appendChild(host);}
+      const c=coverage(),done=c.filter(x=>x.ok).length,badges=c.map(x=>`<span style="white-space:nowrap;margin-right:6px">${x.ok?'✅':'❌'}${x.label}</span>`).join(' ');
+      host.innerHTML=`<div style="font-weight:700;margin-bottom:5px">📦 艦これ完全監査 ${done}/${c.length}</div><div style="line-height:1.65">${badges}</div><div style="margin-top:5px;color:#ffd58a;line-height:1.45">${guide()}</div><div style="margin-top:7px;display:flex;gap:6px"><button data-a="d">JSON書き出し</button><button data-a="s">共有</button><button data-a="h">隠す</button></div><div style="margin-top:5px;opacity:.7">v${VERSION} ${FLAVOR} / passive-only / 追加API送信なし</div>`;
+      host.querySelectorAll('button').forEach(b=>b.style.cssText='font:inherit;padding:5px 8px;border-radius:6px;border:1px solid #888;background:#f4f4f4;color:#111');host.querySelector('[data-a="d"]').onclick=download;host.querySelector('[data-a="s"]').onclick=share;host.querySelector('[data-a="h"]').onclick=()=>{host.remove();host=null;};
     }
-
-    function latestDecks() {
-      const sd = latest.ship_deck;
-      if (Array.isArray(sd?.api_deck_data) && sd.api_deck_data.length) return sd.api_deck_data;
-      if (Array.isArray(sd?.api_deck_port) && sd.api_deck_port.length) return sd.api_deck_port;
-      if (Array.isArray(latest.deck) && latest.deck.length) return latest.deck;
-      if (Array.isArray(latest.deck?.api_deck_data) && latest.deck.api_deck_data.length) return latest.deck.api_deck_data;
-      return asArray(latest.port?.api_deck_port);
-    }
-
-    function mapInfoParts() {
-      const d = latest.mapinfo;
-      if (Array.isArray(d)) return { maps: d, expanded: [] };
-      return {
-        maps: asArray(d?.api_map_info || d?.api_mapinfo),
-        expanded: asArray(d?.api_air_base_expanded_info),
-      };
-    }
-
-    function airBases() {
-      const d = latest.air_bases;
-      if (Array.isArray(d)) return d;
-      return asArray(d?.api_base_air_corps || d?.api_air_base_corps || d?.api_list);
-    }
-
-    function buildAudit() {
-      const start2 = latest.start2 || {};
-      const port = latest.port || {};
-      const req = latest.require_info || {};
-      const maps = mapInfoParts();
-      const ships = latestShips();
-      const slotItems = Array.isArray(latest.slot_item) ? latest.slot_item : asArray(req?.api_slot_item);
-      const decks = latestDecks();
-      const ndocks = Array.isArray(latest.ndock) ? latest.ndock : asArray(port?.api_ndock);
-      const material = Array.isArray(latest.material) ? latest.material : asArray(port?.api_material);
-      const useitems = Array.isArray(latest.useitem) ? latest.useitem : asArray(req?.api_useitem);
-      const basic = latest.basic || port?.api_basic || req?.api_basic || {};
-      const missions = latest.mission || {};
-      const bases = airBases();
-      const questList = [...quests.values()].sort((a, b) => a.id - b.id);
-
-      const master = {
-        ships: asArray(start2.api_mst_ship),
-        ship_graph: asArray(start2.api_mst_shipgraph),
-        slotitems: asArray(start2.api_mst_slotitem),
-        slotitem_equiptype: asArray(start2.api_mst_slotitem_equiptype),
-        stypes: asArray(start2.api_mst_stype),
-        useitems: asArray(start2.api_mst_useitem),
-        missions: asArray(start2.api_mst_mission),
-        mapareas: asArray(start2.api_mst_maparea),
-        mapinfo: asArray(start2.api_mst_mapinfo),
-        furniture: asArray(start2.api_mst_furniture),
-        equip_exslot: asArray(start2.api_mst_equip_exslot),
-        equip_exslot_ship: start2.api_mst_equip_exslot_ship || {},
-      };
-
-      return {
-        generated_at: new Date().toISOString(),
-        meta: {
-          source: 'kancolle final audit (Safari passive export)',
-          script_version: VERSION,
-          passive_only: true,
-          api_token_saved: false,
-          note: 'No extra requests are generated. Only responses from normal game operations are observed.',
-        },
-        status: {
-          ships: ships.length,
-          equipment: slotItems.length,
-          quests: questList.length,
-          air_bases: bases.length,
-          maps: maps.maps.length,
-          errors: 0,
-        },
-        master,
-        member: {
-          ships,
-          slot_items: slotItems,
-          decks,
-          ndocks,
-          material,
-          useitems,
-          basic,
-          missions,
-          mapinfo: maps.maps,
-          air_bases: bases,
-          air_base_expanded_info: maps.expanded,
-          require_info: req,
-          quest_meta: { ...questMeta, captured: questList.length },
-        },
-        quests: questList,
-        captures: Object.fromEntries(KEYS.map(k => [k, !!latest[k]])),
-        captured_at: Object.fromEntries(KEYS.filter(k => times[k]).map(k => [k, times[k]])),
-        errors: [],
-      };
-    }
-
-    function safeStamp() {
-      const d = new Date();
-      const p = n => String(n).padStart(2, '0');
-      return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-    }
-
-    function makeFile() {
-      const json = JSON.stringify(buildAudit(), null, 2);
-      return new File([json], `kancolle_final_audit_${safeStamp()}.json`, { type: 'application/json' });
-    }
-
-    function downloadAudit() {
-      const file = makeFile();
-      const url = URL.createObjectURL(file);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name;
-      a.style.display = 'none';
-      document.documentElement.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 30000);
-    }
-
-    async function shareAudit() {
-      const file = makeFile();
-      try {
-        if (navigator.canShare?.({ files: [file] }) && navigator.share) {
-          await navigator.share({ files: [file], title: '艦これ Audit JSON' });
-        } else {
-          downloadAudit();
-        }
-      } catch (err) {
-        if (err?.name !== 'AbortError') downloadAudit();
-      }
-    }
-
-    function statsText() {
-      const a = buildAudit();
-      const got = KEYS.filter(k => latest[k]).length;
-      const qTotal = Number(questMeta.count || 0);
-      const qText = qTotal ? `${a.status.quests}/${qTotal}` : String(a.status.quests);
-      return `取得 ${got}/${KEYS.length} ｜ 艦 ${a.status.ships} ｜ 装備 ${a.status.equipment} ｜ 任務 ${qText} ｜ 基地 ${a.status.air_bases}`;
-    }
-
-    function missingText() {
-      const missing = KEYS.filter(k => !latest[k]);
-      if (!missing.length) return '主要データ取得済み。任務は全ページを手動表示した分だけ蓄積します。';
-      const labels = {
-        start2:'マスター', port:'母港', ship2:'艦娘一覧', ship3:'艦娘詳細', ship_deck:'艦隊更新',
-        slot_item:'装備一覧', require_info:'保有情報', basic:'提督情報', material:'資材', useitem:'アイテム',
-        deck:'艦隊', ndock:'入渠', mission:'遠征', mapinfo:'海域', questlist:'任務', air_bases:'基地航空隊'
-      };
-      return `未取得: ${missing.map(k => labels[k] || k).join(' / ')}。必要な画面をゲーム内で手動表示すると取得されます。`;
-    }
-
-    function ensureStandalone() {
-      if (standaloneHost?.isConnected) return standaloneHost;
-      const host = document.createElement('div');
-      host.id = '__kcs_audit_standalone';
-      host.style.cssText = 'position:fixed;z-index:2147483644;right:8px;top:106px;font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif';
-      const root = host.attachShadow({ mode: 'open' });
-      root.innerHTML = `<style>
-        button{border:0;border-radius:999px;background:#27445d;color:#fff;padding:9px 12px;font:800 12px -apple-system,BlinkMacSystemFont,sans-serif;min-height:40px}
-      </style><button id="open">📦 Audit</button>`;
-      root.querySelector('#open').onclick = () => showStandalonePanel();
-      document.documentElement.appendChild(host);
-      standaloneHost = host;
-      return host;
-    }
-
-    function showStandalonePanel() {
-      let panel = document.querySelector('#__kcs_audit_panel');
-      if (!panel) {
-        panel = document.createElement('div');
-        panel.id = '__kcs_audit_panel';
-        panel.style.cssText = 'position:fixed;z-index:2147483647;right:8px;top:152px;width:min(94vw,520px);background:#15171df5;color:#fff;border:1px solid #ffffff33;border-radius:14px;padding:12px;font:12px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;box-shadow:0 10px 30px #0009';
-        panel.innerHTML = `<b>📦 Audit JSON</b><div id="s" style="margin:8px 0"></div><div id="m" style="opacity:.8;margin:8px 0"></div><button id="d">JSON書き出し</button> <button id="sh">共有</button> <button id="c">閉じる</button>`;
-        for (const b of panel.querySelectorAll('button')) b.style.cssText = 'border:1px solid #ffffff33;border-radius:9px;background:#2a2d36;color:#fff;padding:8px 10px;min-height:40px';
-        panel.querySelector('#d').onclick = downloadAudit;
-        panel.querySelector('#sh').onclick = shareAudit;
-        panel.querySelector('#c').onclick = () => panel.remove();
-        document.documentElement.appendChild(panel);
-      }
-      panel.querySelector('#s').textContent = statsText();
-      panel.querySelector('#m').textContent = missingText();
-    }
-
-    function injectIntoSafety() {
-      const safety = document.querySelector('#__kcs_safety_ui');
-      const root = safety?.shadowRoot;
-      const panel = root?.querySelector('#panel');
-      if (!panel || root.querySelector('#__kcs_audit_box')) return false;
-
-      const box = document.createElement('div');
-      box.id = '__kcs_audit_box';
-      box.className = 'note';
-      box.innerHTML = `<b>📦 完全JSON書き出し</b>
-        <div id="auditStats" style="margin-top:6px"></div>
-        <div id="auditMissing" class="muted" style="margin:6px 0"></div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn" id="auditDownload">JSON書き出し</button>
-          <button class="btn" id="auditShare">共有</button>
-        </div>
-        <div class="muted" style="margin-top:6px">受動監視のみ。ゲームサーバーへの追加リクエストは0件です。APIトークンも保存しません。</div>`;
-      // Keep export controls below the fleet and blocker settings.
-      panel.appendChild(box);
-      root.querySelector('#auditDownload').onclick = downloadAudit;
-      root.querySelector('#auditShare').onclick = shareAudit;
-      renderUi();
-      return true;
-    }
-
-    function renderUi() {
-      const safety = document.querySelector('#__kcs_safety_ui')?.shadowRoot;
-      if (safety?.querySelector('#auditStats')) {
-        safety.querySelector('#auditStats').textContent = statsText();
-        safety.querySelector('#auditMissing').textContent = missingText();
-      }
-      const panel = document.querySelector('#__kcs_audit_panel');
-      if (panel) {
-        panel.querySelector('#s').textContent = statsText();
-        panel.querySelector('#m').textContent = missingText();
-      }
-    }
-
-    const boot = () => {
-      let tries = 0;
-      const timer = setInterval(() => {
-        tries++;
-        if (injectIntoSafety()) {
-          if (standaloneHost) standaloneHost.remove();
-          clearInterval(timer);
-        } else if (tries >= 12) {
-          ensureStandalone();
-          clearInterval(timer);
-        }
-      }, 500);
-      renderUi();
-    };
-
-    if (document.documentElement) boot();
-    else document.addEventListener('DOMContentLoaded', boot, { once: true });
-
-    console.info(`[KCS Audit] exporter loaded v${VERSION} (passive-only)`);
+    const boot=()=>{render();console.info(`[KCS Audit] ${FLAVOR} collector v${VERSION} passive-only`);};
+    if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',boot,{once:true});else boot();
   }
 })();
