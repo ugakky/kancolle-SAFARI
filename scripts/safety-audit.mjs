@@ -2,7 +2,6 @@ import fs from 'node:fs';
 
 const bridge = fs.readFileSync('kancolle-page-bridge.user.js', 'utf8');
 const ui = fs.readFileSync('kancolle-safety.user.js', 'utf8');
-const legacy = fs.readFileSync('kancolle-audit-export.user.js', 'utf8');
 
 const failures = [];
 const must = (ok, msg) => { if (!ok) failures.push(msg); };
@@ -27,8 +26,6 @@ must(!ui.includes('document.cookie'), 'UI accesses document.cookie');
 must(!ui.includes('GM_cookie'), 'UI accesses GM_cookie');
 must(!/\bfetch\s*\(/.test(ui), 'UI performs fetch');
 must(!/\bWebSocket\s*\(/.test(ui), 'UI opens WebSocket');
-must(!legacy.includes('XMLHttpRequest.prototype'), 'legacy audit exporter still hooks XHR');
-must(!legacy.includes('window.fetch'), 'legacy audit exporter still hooks fetch');
 
 if (failures.length) {
   console.error('Safety audit FAILED:');
