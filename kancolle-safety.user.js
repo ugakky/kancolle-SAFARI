@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         艦これ Safari Safety
+// @name         艦これ Safari Safety v2.5
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      0.2.3
-// @description  艦隊状態・Cond表示・大破警告・5:3ゲーム領域対応のサイズ可変進撃ブロッカー（Safari軽量版）
+// @version      2.5.0
+// @description  受動API表示・大破警告・ダメコン判定・画面端ブロッカー・艦これDB書き出し・ローカルスクショ
 // @match        *://*.dmm.com/*
 // @run-at       document-start
 // @inject-into  content
@@ -11,503 +11,78 @@
 // ==/UserScript==
 
 (() => {
-  'use strict';
-
-  const VERSION = '0.2.3';
-  const FRAME_MESSAGE = '__KCS_SAFETY_FRAME_API__';
-  const GUARD_STORAGE_KEY = '__KCS_SAFETY_GUARD_V1__';
-  const GUARD_DEFAULT = { cx: 0.32, cy: 0.53, w: 0.48, h: 0.74 };
-  const GAME_ASPECT = 1200 / 720;
-  const TRIPLE_TAP_MS = 2400;
-  const UNLOCK_MS = 5000;
-
-  const clamp = (v, min, max) => Math.min(max, Math.max(min, Number(v)));
-  function loadGuard() {
-    try {
-      const raw = JSON.parse(localStorage.getItem(GUARD_STORAGE_KEY) || 'null');
-      if (!raw) return { ...GUARD_DEFAULT };
-      return {
-        cx: clamp(raw.cx ?? GUARD_DEFAULT.cx, 0, 1),
-        cy: clamp(raw.cy ?? GUARD_DEFAULT.cy, 0, 1),
-        w: clamp(raw.w ?? GUARD_DEFAULT.w, 0.20, 1),
-        h: clamp(raw.h ?? GUARD_DEFAULT.h, 0.20, 1),
-      };
-    } catch (_) {
-      return { ...GUARD_DEFAULT };
-    }
-  }
-  const GUARD = loadGuard();
-  function saveGuard() {
-    try { localStorage.setItem(GUARD_STORAGE_KEY, JSON.stringify(GUARD)); } catch (_) {}
-  }
-
-  const S = {
-    masterShips: new Map(), ships: new Map(), decks: new Map(),
-    combined: 0, sortieDeck: 1,
-    fleet1: [], fleet2: [], hpAfter: new Map(),
-    uncertain: false, uncertainReason: '', choice: false,
-    planeLoss: null, ui: null, guard: null,
-    guardActive: false, guardPreview: false, guardPreviewTimer: null,
-    lastGameRect: null,
-    taps: [], apiCount: 0, lastApi: '',
-  };
-
-  const parse = text => {
-    if (typeof text !== 'string') return null;
-    try { return JSON.parse(text.trim().replace(/^svdata=/, '')); } catch (_) { return null; }
-  };
-  const pathOf = u => { try { return new URL(u, location.href).pathname; } catch (_) { return String(u || '').split('?')[0]; } };
-  const params = b => { try { return new URLSearchParams(typeof b === 'string' ? b : ''); } catch (_) { return new URLSearchParams(); } };
-  const hpArray = a => Array.isArray(a) ? ((a[0] < 0 ? a.slice(1) : a).map(Number)) : [];
-  const deckIds = a => Array.isArray(a) ? a.filter(x => Number.isFinite(x) && x > 0) : [];
-  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-
-  function bootUi() {
-    const boot = () => { ensureUi(); render(); };
-    if (document.documentElement) boot();
-    else document.addEventListener('DOMContentLoaded', boot, { once: true });
-  }
-
-  window.addEventListener('message', e => {
-    const d = e?.data?.[FRAME_MESSAGE];
-    if (d && String(d.url || '').includes('/kcsapi/')) onApi(d);
-  });
-  bootUi();
-
-  function onApi(d) {
-    const j = parse(d?.text);
-    if (!j || j.api_result !== 1) return;
-    const p = pathOf(d.url), data = j.api_data;
-    S.apiCount++;
-    S.lastApi = p.split('/').pop() || p;
-    try {
-      if (p.includes('/api_start2/getData')) {
-        for (const m of data?.api_mst_ship || []) if (m?.api_id > 0) S.masterShips.set(m.api_id, m);
-      } else if (p.endsWith('/api_port/port')) {
-        ingestShips(data?.api_ship || []);
-        ingestDecks(data?.api_deck_port || []);
-        if (Number.isFinite(data?.api_combined_flag)) S.combined = data.api_combined_flag;
-        S.hpAfter.clear(); S.uncertain = false; S.choice = false;
-        refreshFleets(); hideGuard();
-      } else if (p.includes('/api_get_member/ship_deck') || p.includes('/api_get_member/ship2') || p.includes('/api_get_member/ship3')) {
-        ingestShips(Array.isArray(data) ? data : data?.api_ship_data || data?.api_ship || []);
-        ingestDecks(data?.api_deck_data || data?.api_deck_port || []);
-        refreshFleets();
-      } else if (p.includes('/api_get_member/deck')) {
-        ingestDecks(Array.isArray(data) ? data : data?.api_deck_data || []);
-        refreshFleets();
-      } else if (p.endsWith('/api_req_map/start')) {
-        S.sortieDeck = Number(params(d.body).get('api_deck_id') || 1);
-        S.hpAfter.clear(); S.uncertain = false; S.choice = false;
-        refreshFleets(); hideGuard();
-      } else if (p.endsWith('/api_req_map/next')) {
-        S.choice = false; S.taps = []; hideGuard();
-      } else if (isBattle(p)) {
-        readBattle(p, data);
-      } else if (p.endsWith('/battleresult')) {
-        battleResult();
-      } else if (p.includes('/goback_port')) {
-        S.choice = false; S.hpAfter.clear(); S.uncertain = false; hideGuard();
-      }
-      render();
-    } catch (err) {
-      console.error('[KCS Safety]', err);
-      S.uncertain = true; S.uncertainReason = 'API解析エラー'; render();
-    }
-  }
-
-  function ingestShips(list) {
-    if (!Array.isArray(list)) return;
-    for (const x of list) if (x?.api_id > 0) S.ships.set(x.api_id, { ...S.ships.get(x.api_id), ...x });
-  }
-  function ingestDecks(list) {
-    if (!Array.isArray(list)) return;
-    for (const x of list) if (x?.api_id > 0) S.decks.set(x.api_id, x);
-  }
-  function fleetIds(deckId) {
-    return deckIds(S.decks.get(Number(deckId))?.api_ship);
-  }
-  function refreshFleets() {
-    S.fleet1 = fleetIds(S.sortieDeck);
-    S.fleet2 = S.sortieDeck === 1 && S.combined > 0 ? fleetIds(2) : [];
-  }
-  function isBattle(p) {
-    return /\/api_req_(sortie|combined_battle|battle_midnight)\//.test(p) && !p.endsWith('/battleresult') && !p.includes('/goback_port');
-  }
-
-  function readBattle(p, d) {
-    if (!Array.isArray(d?.api_f_nowhps) || !Array.isArray(d?.api_f_maxhps)) {
-      S.uncertain = true; S.uncertainReason = `HP配列なし: ${p.split('/').pop()}`; return;
-    }
-    const n1 = hpArray(d.api_f_nowhps), m1 = hpArray(d.api_f_maxhps);
-    const n2 = hpArray(d.api_f_nowhps_combined), m2 = hpArray(d.api_f_maxhps_combined);
-    const hp = [...n1, ...n2].map(x => Math.max(0, x || 0));
-    const max = [...m1, ...m2];
-    refreshFleets();
-    const order = [...S.fleet1, ...S.fleet2];
-    if (order.length < Math.min(hp.length, 6)) {
-      S.uncertain = true; S.uncertainReason = '艦隊とHPの対応失敗'; return;
-    }
-    indexed(hp, d.api_kouku?.api_stage3?.api_fdam, 0);
-    indexed(hp, d.api_kouku?.api_stage3_combined?.api_fdam, 6);
-    indexed(hp, d.api_kouku_combined?.api_stage3?.api_fdam, 6);
-    indexed(hp, d.api_opening_atack?.api_fdam, 0);
-    shell(hp, d.api_opening_taisen); shell(hp, d.api_hougeki1); shell(hp, d.api_hougeki2); shell(hp, d.api_hougeki3);
-    shell(hp, d.api_hougeki); shell(hp, d.api_n_hougeki1); shell(hp, d.api_n_hougeki2);
-    indexed(hp, d.api_raigeki?.api_fdam, 0);
-    indexed(hp, d.api_raigeki_combined?.api_fdam, 6);
-    for (let i = 0; i < Math.min(order.length, hp.length, max.length); i++) {
-      S.hpAfter.set(order[i], { now: Math.max(0, Math.trunc(hp[i])), max: Math.max(1, Math.trunc(max[i])), source: 'battle' });
-    }
-    const st1 = d.api_kouku?.api_stage1;
-    if (Number.isFinite(st1?.api_f_count) && Number.isFinite(st1?.api_f_lostcount)) {
-      S.planeLoss = { before: st1.api_f_count, lost: st1.api_f_lostcount };
-    }
-    S.uncertain = false; S.uncertainReason = '';
-  }
-  function indexed(hp, a, off = 0) {
-    if (!Array.isArray(a)) return;
-    a.forEach((v, i) => {
-      const n = Number(v), k = i + off;
-      if (Number.isFinite(n) && n > 0 && k < hp.length) hp[k] -= Math.trunc(n);
-    });
-  }
-  function shell(hp, h) {
-    if (!h || !Array.isArray(h.api_df_list) || !Array.isArray(h.api_damage)) return;
-    const ef = h.api_at_eflag;
-    for (let i = 0; i < Math.min(h.api_df_list.length, h.api_damage.length); i++) {
-      if (Array.isArray(ef) && Number(ef[i]) !== 1) continue;
-      const ts = Array.isArray(h.api_df_list[i]) ? h.api_df_list[i] : [];
-      const ds = Array.isArray(h.api_damage[i]) ? h.api_damage[i] : [];
-      for (let z = 0; z < Math.min(ts.length, ds.length); z++) {
-        let k = Number(ts[z]), n = Number(ds[z]);
-        if (!Number.isFinite(k) || !Number.isFinite(n) || n <= 0) continue;
-        if (!Array.isArray(ef)) { if (k < 1 || k > 6) continue; k--; }
-        if (k >= 0 && k < hp.length) hp[k] -= Math.trunc(n);
-      }
-    }
-  }
-
-  function ship(id) {
-    const x = S.ships.get(id), mst = x && S.masterShips.get(x.api_ship_id);
-    return {
-      id,
-      name: mst?.api_name || `艦ID ${id}`,
-      lv: x?.api_lv ?? '?',
-      cond: Number.isFinite(x?.api_cond) ? x.api_cond : null,
-      fuel: x?.api_fuel ?? '?',
-      ammo: x?.api_bull ?? '?',
-      onslot: Array.isArray(x?.api_onslot) ? x.api_onslot : []
-    };
-  }
-  function hp(id) {
-    if (S.hpAfter.has(id)) return S.hpAfter.get(id);
-    const x = S.ships.get(id);
-    return Number.isFinite(x?.api_nowhp) ? { now:x.api_nowhp, max:x.api_maxhp, source:'last' } : null;
-  }
-  function damage(h) {
-    if (!h || !Number.isFinite(h.now) || !Number.isFinite(h.max)) return ['不明','unknown'];
-    if (h.now <= 0 || h.now * 4 <= h.max) return ['大破','danger'];
-    if (h.now * 2 <= h.max) return ['中破','warn'];
-    if (h.now * 4 <= h.max * 3) return ['小破','minor'];
-    return ['健在','ok'];
-  }
-  function condInfo(value) {
-    if (value === null || value === undefined || value === '') return { text:'? 不明', cls:'cond-unknown' };
-    const c = Number(value);
-    if (!Number.isFinite(c)) return { text:'? 不明', cls:'cond-unknown' };
-    if (c >= 50) return { text:`✨ ${c} キラ`, cls:'cond-kira' };
-    if (c >= 40) return { text:`${c} 通常`, cls:'cond-normal' };
-    if (c >= 30) return { text:`${c} 軽疲労`, cls:'cond-light' };
-    if (c >= 20) return { text:`🟠 ${c}`, cls:'cond-orange' };
-    return { text:`🔴 ${c}`, cls:'cond-red' };
-  }
-  function heavies() {
-    return [...S.fleet1, ...S.fleet2].filter(id => damage(hp(id))[1] === 'danger').map(id => ({ ...ship(id), hp:hp(id) }));
-  }
-
-  function battleResult() {
-    S.choice = true;
-    const bad = heavies();
-    if (bad.length || S.uncertain) showGuard(bad);
-    else hideGuard();
-    openPanel(true);
-  }
-
-  function ensureUi() {
-    if (S.ui || !document.documentElement) return;
-    const host = document.createElement('div');
-    host.id = '__kcs_safety_ui';
-    host.style.cssText = 'position:fixed;z-index:2147483645;right:8px;top:56px;font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif';
-    const root = host.attachShadow({mode:'open'});
-    root.innerHTML = `<style>
-*{box-sizing:border-box}
-button{font:inherit;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
-.chip{border:0;border-radius:999px;background:#5b4c14;color:#fff;padding:10px 14px;font-weight:800;min-height:42px}
-.p{display:none;position:fixed;right:8px;top:96px;width:min(96vw,660px);max-height:82vh;overflow:auto;background:#15171df2;color:#fff;border:1px solid #ffffff33;border-radius:14px;padding:12px;box-shadow:0 10px 30px #0009;font-size:12px}
-.p.open{display:block}
-.top{display:flex;gap:10px;align-items:center;position:sticky;top:-12px;z-index:2;background:#15171df7;padding:10px 0 8px}
-.top b{flex:1;font-size:15px}
-.btn{border:1px solid #ffffff33;border-radius:9px;background:#2a2d36;color:#fff;padding:8px 10px;min-height:40px}
-.close{min-width:112px;min-height:50px;padding:10px 16px;border:2px solid #ff9cab;background:#5b2330;font-size:16px;font-weight:900}
-.tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:8px 0}
-.tabs .btn{font-weight:800;min-width:0}
-.tabs .on{background:#fff;color:#111;border-color:#fff}
-.note{padding:8px;border-radius:8px;background:#272a33;margin:7px 0;line-height:1.45}
-.red{background:#641726;border:1px solid #ff7484}
-.yellow{background:#584515;border:1px solid #e3b840}
-.guardset{display:grid;gap:8px}
-.rangeRow{display:grid;grid-template-columns:34px 1fr 48px;align-items:center;gap:8px}
-.rangeRow input{width:100%;min-height:30px}
-.guardBtns{display:flex;gap:8px;flex-wrap:wrap}
-.guardMeta{font-size:11px;opacity:.72}
-.tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-table{width:100%;border-collapse:collapse;font-size:11px}
-th,td{padding:7px 4px;border-bottom:1px solid #ffffff18;text-align:left;white-space:nowrap}
-tr.danger{background:#651729}
-tr.warn{background:#554313}
-tr.unknown{background:#463e55}
-.muted{opacity:.62}
-.name{max-width:142px;overflow:hidden;text-overflow:ellipsis}
-.cond{font-weight:800}
-.cond-kira{color:#ffe783}
-.cond-normal{color:#d9f7df}
-.cond-light{color:#ffe39a}
-.cond-orange{color:#ffb35c}
-.cond-red{color:#ff7f8e}
-.cond-unknown{color:#c8c8d0}
-</style>
-<button class="chip" id="chip">⚓ 待機</button>
-<section class="p" id="panel">
-  <div class="top">
-    <b>⚓ 艦隊状態 v${VERSION}</b>
-    <button class="btn close" id="close">✕ 閉じる</button>
-  </div>
-  <div id="debug"></div>
-  <div id="summary"></div>
-  <div class="tabs">
-    <button class="btn on" data-fleet="1">第1</button>
-    <button class="btn" data-fleet="2">第2</button>
-    <button class="btn" data-fleet="3">第3</button>
-    <button class="btn" data-fleet="4">第4</button>
-  </div>
-  <div id="fleet"></div>
-  <div id="planes"></div>
-  <div class="note guardset">
-    <b>🚧 進撃ブロッカー</b>
-    <div class="rangeRow"><span>横</span><input id="guardW" type="range" min="20" max="100" step="1" value="${Math.round(GUARD.w * 100)}"><strong id="guardWVal"></strong></div>
-    <div class="rangeRow"><span>縦</span><input id="guardH" type="range" min="20" max="100" step="1" value="${Math.round(GUARD.h * 100)}"><strong id="guardHVal"></strong></div>
-    <div class="guardBtns"><button class="btn" id="guardTest">サイズ確認</button><button class="btn" id="guardReset">初期サイズ</button></div>
-    <div class="guardMeta" id="guardMeta">ゲーム画面を検出中…</div>
-  </div>
-</section>`;
-    document.documentElement.appendChild(host);
-    S.ui = root;
-    let tab = 1;
-    const q = x => root.querySelector(x);
-    q('#chip').onclick = () => openPanel();
-    q('#close').onclick = () => openPanel(false);
-    q('#guardW').oninput = e => {
-      GUARD.w = clamp(Number(e.target.value) / 100, 0.20, 1);
-      saveGuard(); updateGuardSettingsUi(); positionGuard();
-    };
-    q('#guardH').oninput = e => {
-      GUARD.h = clamp(Number(e.target.value) / 100, 0.20, 1);
-      saveGuard(); updateGuardSettingsUi(); positionGuard();
-    };
-    q('#guardReset').onclick = () => {
-      Object.assign(GUARD, GUARD_DEFAULT); saveGuard(); updateGuardSettingsUi(); positionGuard();
-    };
-    q('#guardTest').onclick = () => previewGuard();
-    for (const b of root.querySelectorAll('[data-fleet]')) {
-      b.onclick = () => {
-        tab = Number(b.dataset.fleet || 1);
-        for (const x of root.querySelectorAll('[data-fleet]')) x.classList.toggle('on', x === b);
-        renderFleet(tab);
-      };
-    }
-    root.__tab = () => tab;
-    updateGuardSettingsUi();
-  }
-  function openPanel(v) {
-    if (!S.ui) return;
-    const p = S.ui.querySelector('#panel');
-    p.classList.toggle('open', typeof v === 'boolean' ? v : !p.classList.contains('open'));
-    if (p.classList.contains('open')) updateGuardSettingsUi();
-  }
-  function render() {
-    if (!S.ui) return;
-    const q = x => S.ui.querySelector(x), bad = heavies();
-    q('#chip').textContent = bad.length ? `🚨 大破 ${bad.length}` : S.uncertain ? '⚠️ 判定不明' : S.apiCount ? '⚓ 状態' : '⚓ 待機';
-    q('#chip').style.background = bad.length?'#a4142c':S.uncertain?'#6b5418':S.apiCount?'#17191f':'#5b4c14';
-    q('#debug').innerHTML = `<div class="note">🔧 v${VERSION} / API ${S.apiCount}${S.lastApi?` / 最終: ${esc(S.lastApi)}`:''}<br><span class="muted">軽量モード：通信監視はBridgeだけで実行。</span></div>`;
-    q('#summary').innerHTML =
-      (bad.length?`<div class="note red">🚨 大破：${bad.map(x=>esc(x.name)).join(' / ')}<br>進撃系ゾーンをロック中。</div>`:'') +
-      (S.uncertain?`<div class="note yellow">⚠️ HP判定不明：${esc(S.uncertainReason)}</div>`:'') +
-      `<div class="note">HPの <b>*</b> は戦闘APIからの戦闘後計算値。燃料・弾薬・搭載数・Condは最終取得値です。Cond：50以上=キラ / 40〜49=通常 / 30〜39=軽疲労 / 20〜29=橙 / 0〜19=赤。</div>`;
-    updateGuardSettingsUi();
-    renderFleet(S.ui.__tab());
-    q('#planes').innerHTML = S.planeLoss ? `<div class="note">✈️ 直近航空戦：総搭載 ${S.planeLoss.before} / 総損失 ${S.planeLoss.lost}</div>` : '';
-  }
-  function updateGuardSettingsUi() {
-    if (!S.ui) return;
-    const q = x => S.ui.querySelector(x);
-    const w = Math.round(GUARD.w * 100), h = Math.round(GUARD.h * 100);
-    if (q('#guardW')) q('#guardW').value = String(w);
-    if (q('#guardH')) q('#guardH').value = String(h);
-    if (q('#guardWVal')) q('#guardWVal').textContent = `${w}%`;
-    if (q('#guardHVal')) q('#guardHVal').textContent = `${h}%`;
-    const r = gameRect();
-    if (q('#guardMeta')) q('#guardMeta').textContent = r
-      ? `ゲーム本体 ${Math.round(r.width)}×${Math.round(r.height)}px（5:3）を検出。縦横どちらでもこの枠内だけに表示。`
-      : 'ゲーム画面をまだ検出できていません。母港画面を表示すると再検出します。';
-  }
-  function renderFleet(tab) {
-    if (!S.ui) return;
-    const ids = fleetIds(tab), box = S.ui.querySelector('#fleet');
-    if (!ids.length) {
-      box.innerHTML = `<div class="note">第${tab}艦隊のデータ待ち。母港を一度表示すると更新されます。</div>`;
-      return;
-    }
-    const rows = ids.map(id => {
-      const x = ship(id), h = hp(id), [label, cls] = damage(h), ci = condInfo(x.cond);
-      return `<tr class="${cls}"><td>${label}</td><td class="name">${esc(x.name)} Lv${x.lv}</td><td>${h?`${h.now}/${h.max}${h.source==='battle'?'*':''}`:'?'}</td><td class="cond ${ci.cls}">${ci.text}</td><td>${x.fuel}</td><td>${x.ammo}</td><td>${x.onslot.length?x.onslot.join('/'):'-'}</td></tr>`;
-    }).join('');
-    box.innerHTML = `<div class="note">第${tab}艦隊${Number(tab) === Number(S.sortieDeck) ? '（出撃艦隊）' : ''}</div><div class="tablewrap"><table><thead><tr><th>状態</th><th>艦</th><th>HP</th><th>Cond</th><th>燃</th><th>弾</th><th>搭載</th></tr></thead><tbody>${rows}</tbody></table></div>`;
-  }
-
-  function validRect(r) { return r && r.width > 300 && r.height > 180 && r.bottom > 0 && r.right > 0; }
-  function clipRect(r) {
-    if (!r) return null;
-    const left = clamp(r.left, 0, innerWidth);
-    const top = clamp(r.top, 0, innerHeight);
-    const right = clamp(r.right, 0, innerWidth);
-    const bottom = clamp(r.bottom, 0, innerHeight);
-    return { left, top, right, bottom, width: Math.max(0, right-left), height: Math.max(0, bottom-top) };
-  }
-  function cropGameRect(raw) {
-    if (!raw || raw.width <= 0 || raw.height <= 0) return null;
-    const gameHeight = Math.min(raw.height, raw.width / GAME_ASPECT);
-    return clipRect({
-      left: raw.left,
-      top: raw.top,
-      right: raw.right,
-      bottom: raw.top + gameHeight,
-      width: raw.width,
-      height: gameHeight,
-    });
-  }
-  function gameRect() {
-    const frames = [...document.querySelectorAll('iframe')].map(el => {
-      const raw = el.getBoundingClientRect();
-      const r = cropGameRect(raw);
-      const src = String(el.getAttribute('src') || '');
-      const hint = /kancolle|kcs|osapi|gadgets/i.test(src) ? 2.2 : 1;
-      const score = r ? r.width * r.height * hint : 0;
-      return { r, score };
-    }).filter(x => validRect(x.r));
-    if (frames.length) {
-      frames.sort((a,b) => b.score - a.score);
-      S.lastGameRect = { ...frames[0].r };
-      return S.lastGameRect;
-    }
-    if (validRect(S.lastGameRect)) {
-      const r = clipRect(S.lastGameRect);
-      if (validRect(r)) return r;
-    }
-    return null;
-  }
-
-  function ensureGuard() {
-    if (S.guard?.isConnected) return S.guard;
-    const g = document.createElement('div');
-    g.style.cssText = 'position:fixed;z-index:2147483646;display:none;align-items:center;justify-content:center;text-align:center;background:rgba(180,0,25,.88);border:4px solid #ff9cab;border-radius:16px;color:white;font:900 clamp(12px,2.5vw,24px)/1.35 -apple-system,BlinkMacSystemFont,sans-serif;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;overflow:hidden';
-    const stop = e => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation?.(); };
-    g.addEventListener('touchstart', e => { stop(e); if (!S.guardPreview) guardTap(); }, { passive:false, capture:true });
-    g.addEventListener('touchend', stop, { passive:false, capture:true });
-    g.addEventListener('pointerdown', e => { stop(e); if (!S.guardPreview && e.pointerType !== 'touch') guardTap(); }, { passive:false, capture:true });
-    g.addEventListener('pointerup', stop, { passive:false, capture:true });
-    g.addEventListener('click', stop, true);
-    document.documentElement.appendChild(g);
-    S.guard = g;
-    addEventListener('resize', () => { positionGuard(); updateGuardSettingsUi(); }, {passive:true});
-    addEventListener('orientationchange', () => setTimeout(() => { S.lastGameRect = null; positionGuard(); updateGuardSettingsUi(); }, 100), {passive:true});
-    addEventListener('scroll', positionGuard, {passive:true, capture:true});
-    if (window.visualViewport) {
-      visualViewport.addEventListener('resize', () => { S.lastGameRect = null; positionGuard(); updateGuardSettingsUi(); }, {passive:true});
-      visualViewport.addEventListener('scroll', positionGuard, {passive:true});
-    }
-    return g;
-  }
-  function showGuard(bad) {
-    const g = ensureGuard();
-    if (S.guardPreviewTimer) clearTimeout(S.guardPreviewTimer);
-    S.guardPreview = false;
-    S.guardActive = true;
-    S.taps = [];
-    g.style.pointerEvents = 'auto';
-    g.style.background = 'rgba(180,0,25,.88)';
-    g.innerHTML = `<div>🚨 ${bad.length?'大破艦あり':'HP判定不明'}<br><small>進撃系ボタンをロック中</small><br><small>進撃するなら赤枠を3連続タップ</small><br><span id="gc">0 / 3</span></div>`;
-    g.style.display = 'flex';
-    positionGuard();
-  }
-  function previewGuard() {
-    const g = ensureGuard();
-    if (S.guardPreviewTimer) clearTimeout(S.guardPreviewTimer);
-    S.guardPreview = true;
-    S.guardActive = true;
-    g.style.pointerEvents = 'none';
-    g.style.background = 'rgba(180,0,25,.62)';
-    g.innerHTML = '<div>🚧 サイズ確認<br><small>ゲーム本体（5:3）の外には出ません</small></div>';
-    g.style.display = 'flex';
-    positionGuard();
-    S.guardPreviewTimer = setTimeout(() => {
-      S.guardPreview = false;
-      S.guardPreviewTimer = null;
-      if (S.choice && (heavies().length || S.uncertain)) showGuard(heavies());
-      else hideGuard();
-    }, 4000);
-  }
-  function hideGuard() {
-    if (S.guardPreviewTimer) clearTimeout(S.guardPreviewTimer);
-    S.guardPreviewTimer = null;
-    S.guardPreview = false;
-    S.guardActive = false;
-    if (S.guard) S.guard.style.display = 'none';
-    S.taps = [];
-  }
-  function positionGuard() {
-    if (!S.guard || !S.guardActive) return;
-    const r = gameRect();
-    if (!r) {
-      S.guard.style.visibility = 'hidden';
-      return;
-    }
-    S.guard.style.visibility = 'visible';
-    const w = Math.min(r.width, Math.max(96, r.width * GUARD.w));
-    const h = Math.min(r.height, Math.max(72, r.height * GUARD.h));
-    let left = r.left + r.width * GUARD.cx - w / 2;
-    let top = r.top + r.height * GUARD.cy - h / 2;
-    left = clamp(left, r.left, r.right - w);
-    top = clamp(top, r.top, r.bottom - h);
-    S.guard.style.left = `${Math.round(left)}px`;
-    S.guard.style.top = `${Math.round(top)}px`;
-    S.guard.style.width = `${Math.round(w)}px`;
-    S.guard.style.height = `${Math.round(h)}px`;
-  }
-  function guardTap() {
-    const n = Date.now();
-    S.taps = S.taps.filter(t => n - t <= TRIPLE_TAP_MS);
-    S.taps.push(n);
-    const c = S.guard?.querySelector('#gc');
-    if (c) c.textContent = `${Math.min(3,S.taps.length)} / 3`;
-    if (S.taps.length >= 3) {
-      S.guard.style.pointerEvents = 'none';
-      S.guard.style.background = 'rgba(20,125,60,.76)';
-      S.guard.innerHTML = '<div>一時解除中<br><small>5秒以内に実際の「進撃」をタップ</small></div>';
-      setTimeout(() => { if (S.choice) showGuard(heavies()); }, UNLOCK_MS);
-    }
-  }
-
-  console.info(`[KCS Safety] loaded v${VERSION} (bridge-only)`);
+'use strict';
+const VERSION='2.5.0';
+const API_MSG='__KCS_SAFE25_API__', SHOT_REQ='__KCS_SAFE25_SCREENSHOT_REQ__', SHOT_RES='__KCS_SAFE25_SCREENSHOT_RES__';
+const CFG_KEY='__KCS_SAFE25_CONFIG__';
+const DEFAULT_CFG={guardRight:0.58,guardTop:0.08,guardBottom:0.96,unlockTripleTap:true};
+const clamp=(v,a,b)=>Math.min(b,Math.max(a,Number(v)));
+function loadCfg(){try{return {...DEFAULT_CFG,...JSON.parse(localStorage.getItem(CFG_KEY)||'{}')};}catch(_){return {...DEFAULT_CFG};}}
+const C=loadCfg();
+function saveCfg(){try{localStorage.setItem(CFG_KEY,JSON.stringify(C));}catch(_){}}
+const S={master:{raw:{},ships:new Map(),slots:new Map()},ships:new Map(),slots:new Map(),decks:new Map(),memberRaw:new Map(),latestRaw:new Map(),capturedAt:new Map(),quests:new Map(),questPages:new Set(),questMeta:{},airBases:new Map(),airExpanded:new Map(),combined:0,sortieDeck:1,fleet1:[],fleet2:[],hpAfter:new Map(),dcUncertain:new Set(),sortie:null,completedSorties:[],apiCount:0,lastApi:'',bridge:false,uncertain:false,uncertainReason:'',choice:false,guard:null,guardActive:false,taps:[],ui:null,tab:'fleet',screenshotPending:new Map(),material:[],useitems:[],basic:{},ndocks:[],kdocks:[],missions:{},mapinfo:[]};
+const arr=v=>Array.isArray(v)?v:[];
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const hpArray=a=>Array.isArray(a)?((a[0]<0?a.slice(1):a).map(Number)):[];
+const deckIds=a=>arr(a).map(Number).filter(x=>x>0);
+const pathTail=p=>String(p||'').split('/').filter(Boolean).pop()||'';
+window.addEventListener('message',e=>{const d=e?.data?.[API_MSG];if(d){try{const h=new URL(e.origin).hostname;if(!/(^|\.)kancolle-server\.com$/i.test(h)&&!/^203\.104\.209\.\d+$/.test(h))return;}catch(_){return;}onApi(d);return;}const shot=e?.data?.[SHOT_RES];if(shot){const p=S.screenshotPending.get(String(shot.requestId||''));if(!p)return;S.screenshotPending.delete(String(shot.requestId));clearTimeout(p.timer);if(shot.error)p.reject(new Error(shot.error));else p.resolve(shot.blob);}});
+boot();
+function onApi(d){const p=String(d.path||'');if(!p.startsWith('/kcsapi/'))return;S.bridge=true;S.apiCount++;S.lastApi=pathTail(p);S.latestRaw.set(p,d.data);S.capturedAt.set(p,d.captured_at||new Date().toISOString());if(p==='/kcsapi/__safe25_heartbeat__'){render();return;}try{if(p==='/kcsapi/api_start2/getData')ingestMaster(d.data);if(p==='/kcsapi/api_port/port')ingestPort(d.data);if(p.startsWith('/kcsapi/api_get_member/'))ingestMember(p,d.data);ingestStateFragments(d.data);if(p==='/kcsapi/api_req_map/start')startSortie(d);else if(p==='/kcsapi/api_req_map/next')mapNext(d.data);else if(isBattle(p))readBattle(p,d.data);else if(p.endsWith('/battleresult'))battleResult(p,d.data);else if(p.includes('/goback_port'))endChoice();if(p.endsWith('/base_air_corps')||p.startsWith('/kcsapi/api_req_air_corps/'))mergeBases(d.data);if(p.endsWith('/mapinfo'))mergeMapInfo(d.data);if(p.endsWith('/questlist'))mergeQuests(d.data);refreshFleets();render();}catch(err){S.uncertain=true;S.uncertainReason=`解析エラー: ${pathTail(p)}`;console.error('[KCS Safe25]',err);render();}}
+function ingestMaster(d){S.master.raw=d||{};S.master.ships.clear();S.master.slots.clear();for(const x of arr(d?.api_mst_ship))if(Number(x?.api_id)>0)S.master.ships.set(Number(x.api_id),x);for(const x of arr(d?.api_mst_slotitem))if(Number(x?.api_id)>0)S.master.slots.set(Number(x.api_id),x);}
+function ingestPort(d){ingestShips(d?.api_ship);ingestDecks(d?.api_deck_port);S.material=arr(d?.api_material);S.ndocks=arr(d?.api_ndock);S.basic=d?.api_basic||S.basic;if(Number.isFinite(d?.api_combined_flag))S.combined=Number(d.api_combined_flag);S.hpAfter.clear();S.dcUncertain.clear();S.uncertain=false;S.uncertainReason='';S.choice=false;hideGuard();if(S.sortie){S.sortie.ended_at=new Date().toISOString();S.completedSorties.unshift(S.sortie);S.completedSorties=S.completedSorties.slice(0,20);S.sortie=null;}}
+function ingestMember(p,d){const key=p.replace('/kcsapi/api_get_member/','');S.memberRaw.set(key,d);if(key==='ship2'||key==='ship3'||key==='ship_deck'){ingestShips(Array.isArray(d)?d:(d?.api_ship_data||d?.api_ship));ingestDecks(d?.api_deck_data||d?.api_deck_port);}else if(key==='slot_item')ingestSlots(d);else if(key==='deck')ingestDecks(Array.isArray(d)?d:d?.api_deck_data);else if(key==='material')S.material=arr(d);else if(key==='useitem')S.useitems=arr(d);else if(key==='basic')S.basic=d||{};else if(key==='ndock')S.ndocks=arr(d);else if(key==='kdock')S.kdocks=arr(d);else if(key==='mission')S.missions=d||{};else if(key==='mapinfo')mergeMapInfo(d);else if(key==='base_air_corps')mergeBases(d);else if(key==='questlist')mergeQuests(d);else if(key==='require_info'){ingestSlots(d?.api_slot_item);S.useitems=arr(d?.api_useitem).length?arr(d.api_useitem):S.useitems;S.kdocks=arr(d?.api_kdock).length?arr(d.api_kdock):S.kdocks;if(d?.api_basic)S.basic=d.api_basic;}}
+function ingestStateFragments(d){if(!d||typeof d!=='object')return;if(Array.isArray(d.api_ship_data))ingestShips(d.api_ship_data);if(Array.isArray(d.api_ship))ingestShips(d.api_ship);if(Array.isArray(d.api_deck_data))ingestDecks(d.api_deck_data);if(Array.isArray(d.api_deck_port))ingestDecks(d.api_deck_port);if(Array.isArray(d.api_slot_data))ingestSlots(d.api_slot_data);if(Array.isArray(d.api_material))S.material=d.api_material;}
+function ingestShips(list){if(!Array.isArray(list))return;for(const x of list)if(Number(x?.api_id)>0){S.ships.set(Number(x.api_id),{...S.ships.get(Number(x.api_id)),...x});S.dcUncertain.delete(Number(x.api_id));}}
+function ingestSlots(list){if(!Array.isArray(list))return;for(const x of list)if(Number(x?.api_id)>0)S.slots.set(Number(x.api_id),x);}
+function ingestDecks(list){if(!Array.isArray(list))return;for(const x of list)if(Number(x?.api_id)>0)S.decks.set(Number(x.api_id),x);}
+function mergeMapInfo(d){const list=Array.isArray(d)?d:arr(d?.api_map_info||d?.api_mapinfo);if(list.length)S.mapinfo=list;for(const x of arr(d?.api_air_base_expanded_info))S.airExpanded.set(`${Number(x?.api_area_id||x?.api_maparea_id||0)}:${Number(x?.api_rid||x?.api_id||0)}`,x);}
+function baseList(d){if(Array.isArray(d))return d;if(Array.isArray(d?.api_base_air_corps))return d.api_base_air_corps;if(Array.isArray(d?.api_air_base_corps))return d.api_air_base_corps;if(Array.isArray(d?.api_list))return d.api_list;if(d&&typeof d==='object'&&(d.api_area_id||d.api_rid)&&d.api_plane_info)return[d];return[];}
+function mergeBases(d){baseList(d).forEach((x,i)=>S.airBases.set(`${Number(x?.api_area_id||x?.api_maparea_id||0)}:${Number(x?.api_rid||x?.api_id||i+1)}`,x));}
+function mergeQuests(d){const pg=Number(d?.api_disp_page||0);if(pg>0)S.questPages.add(pg);for(const q of arr(d?.api_list))if(Number(q?.api_no)>0)S.quests.set(Number(q.api_no),q);S.questMeta={count:Number(d?.api_count||S.questMeta.count||S.quests.size),page_count:Number(d?.api_page_count||S.questMeta.page_count||0),disp_page:pg||S.questMeta.disp_page||0,exec_count:Number(d?.api_exec_count||S.questMeta.exec_count||0)};}
+function fleetIds(id){return deckIds(S.decks.get(Number(id))?.api_ship);}
+function refreshFleets(){S.fleet1=fleetIds(S.sortieDeck);S.fleet2=(S.sortieDeck===1&&S.combined>0)?fleetIds(2):[];}
+function startSortie(d){S.sortieDeck=Number(d?.request?.api_deck_id||1);refreshFleets();S.hpAfter.clear();S.dcUncertain.clear();S.uncertain=false;S.uncertainReason='';S.choice=false;hideGuard();S.sortie={started_at:new Date().toISOString(),deck_id:S.sortieDeck,maparea_id:Number(d?.request?.api_maparea_id||d?.data?.api_maparea_id||0),mapinfo_no:Number(d?.request?.api_mapinfo_no||d?.data?.api_mapinfo_no||0),nodes:[nodeLite(d.data)],events:[eventLite(d.path,d.data)]};}
+function mapNext(d){S.choice=false;hideGuard();if(S.sortie){S.sortie.nodes.push(nodeLite(d));S.sortie.events.push(eventLite('/kcsapi/api_req_map/next',d));}}
+function nodeLite(d){return{at:new Date().toISOString(),no:Number(d?.api_no||0),next:Number(d?.api_next||0),color:Number(d?.api_color_no||0),event_id:Number(d?.api_event_id||0),event_kind:Number(d?.api_event_kind||0),boss:Number(d?.api_bosscell_no||0)};}
+function eventLite(path,d){return{at:new Date().toISOString(),path,data:d};}
+function isBattle(p){return /\/api_req_(sortie|combined_battle|battle_midnight)\//.test(p)&&!p.endsWith('/battleresult')&&!p.includes('/goback_port');}
+function readBattle(p,d){refreshFleets();const order=[...S.fleet1,...S.fleet2];for(const id of order)if(damage(hp(id)).kind==='danger'&&damageControl(id).protected)S.dcUncertain.add(id);if(!Array.isArray(d?.api_f_nowhps)||!Array.isArray(d?.api_f_maxhps)){S.uncertain=true;S.uncertainReason=`HP配列なし: ${pathTail(p)}`;return;}const n1=hpArray(d.api_f_nowhps),m1=hpArray(d.api_f_maxhps),n2=hpArray(d.api_f_nowhps_combined),m2=hpArray(d.api_f_maxhps_combined),now=[...n1,...n2].map(x=>Math.max(0,Number(x)||0)),max=[...m1,...m2];if(order.length<Math.min(now.length,6)){S.uncertain=true;S.uncertainReason='艦隊とHPの対応を確認できません';return;}indexed(now,d.api_kouku?.api_stage3?.api_fdam,0);indexed(now,d.api_kouku?.api_stage3_combined?.api_fdam,6);indexed(now,d.api_kouku_combined?.api_stage3?.api_fdam,6);indexed(now,d.api_opening_atack?.api_fdam,0);shell(now,d.api_opening_taisen);shell(now,d.api_hougeki1);shell(now,d.api_hougeki2);shell(now,d.api_hougeki3);shell(now,d.api_hougeki);shell(now,d.api_n_hougeki1);shell(now,d.api_n_hougeki2);indexed(now,d.api_raigeki?.api_fdam,0);indexed(now,d.api_raigeki_combined?.api_fdam,6);for(let i=0;i<Math.min(order.length,now.length,max.length);i++)S.hpAfter.set(order[i],{now:Math.max(0,Math.trunc(now[i])),max:Math.max(1,Math.trunc(max[i])),source:'battle-calc'});S.uncertain=false;S.uncertainReason='';if(S.sortie)S.sortie.events.push(eventLite(p,d));}
+function indexed(hp,a,off=0){if(!Array.isArray(a))return;a.forEach((v,i)=>{const n=Number(v),k=i+off;if(Number.isFinite(n)&&n>0&&k<hp.length)hp[k]-=Math.trunc(n);});}
+function shell(hp,h){if(!h||!Array.isArray(h.api_df_list)||!Array.isArray(h.api_damage))return;const ef=h.api_at_eflag;for(let i=0;i<Math.min(h.api_df_list.length,h.api_damage.length);i++){if(Array.isArray(ef)&&Number(ef[i])!==1)continue;const ts=arr(h.api_df_list[i]),ds=arr(h.api_damage[i]);for(let z=0;z<Math.min(ts.length,ds.length);z++){let k=Number(ts[z]),n=Number(ds[z]);if(!Number.isFinite(k)||!Number.isFinite(n)||n<=0)continue;if(!Array.isArray(ef)){if(k<1||k>6)continue;k--;}if(k>=0&&k<hp.length)hp[k]-=Math.trunc(n);}}}
+function battleResult(p,d){S.choice=true;if(S.sortie)S.sortie.events.push(eventLite(p,d));applyGuardDecision();S.tab='fleet';openPanel(true);}
+function endChoice(){S.choice=false;S.hpAfter.clear();S.dcUncertain.clear();hideGuard();}
+function hp(id){if(S.hpAfter.has(id))return S.hpAfter.get(id);const x=S.ships.get(Number(id));return Number.isFinite(x?.api_nowhp)?{now:Number(x.api_nowhp),max:Number(x.api_maxhp),source:'server'}:null;}
+function damage(h){if(!h||!Number.isFinite(h.now)||!Number.isFinite(h.max))return{text:'不明',kind:'unknown'};if(h.now<=0||h.now*4<=h.max)return{text:'大破',kind:'danger'};if(h.now*2<=h.max)return{text:'中破',kind:'warn'};if(h.now*4<=h.max*3)return{text:'小破',kind:'minor'};return{text:'健在',kind:'ok'};}
+function slotMasterId(instanceId){return Number(S.slots.get(Number(instanceId))?.api_slotitem_id||0);}
+function damageControl(id){const x=S.ships.get(Number(id));if(!x)return{protected:false,verified:false,label:'艦データなし'};if(S.dcUncertain.has(Number(id)))return{protected:false,verified:false,label:'前戦闘後は再確認必要'};const ids=[...arr(x.api_slot),Number(x.api_slot_ex||-1)].map(Number).filter(v=>v>0);if(!ids.length)return{protected:false,verified:true,label:'なし'};let unresolved=false;for(const iid of ids){const mid=slotMasterId(iid);if(!mid){unresolved=true;continue;}const name=S.master.slots.get(mid)?.api_name||'';if(mid===42||mid===43||name==='応急修理要員'||name==='応急修理女神')return{protected:true,verified:true,label:mid===43||name==='応急修理女神'?'女神':'修理要員'};}return unresolved?{protected:false,verified:false,label:'装備照合不可'}:{protected:false,verified:true,label:'なし'};}
+function shipView(id){const x=S.ships.get(Number(id))||{},m=S.master.ships.get(Number(x.api_ship_id))||{},h=hp(id),d=damage(h),dc=damageControl(id),fuelMax=Number(m.api_fuel_max||0),ammoMax=Number(m.api_bull_max||0),fuel=Number(x.api_fuel),ammo=Number(x.api_bull),fr=fuelMax>0&&Number.isFinite(fuel)?fuel/fuelMax:null,ar=ammoMax>0&&Number.isFinite(ammo)?ammo/ammoMax:null;return{id:Number(id),ship_id:Number(x.api_ship_id||0),name:m.api_name||`艦ID ${id}`,lv:x.api_lv??'?',cond:Number.isFinite(x.api_cond)?Number(x.api_cond):null,hp:h,damage:d,damage_control:dc,fuel:Number.isFinite(fuel)?fuel:null,fuel_max:fuelMax||null,fuel_ratio:fr,ammo:Number.isFinite(ammo)?ammo:null,ammo_max:ammoMax||null,ammo_ratio:ar,ammo_damage_modifier:ar===null?null:Math.min(1,Math.max(0,ar*2)),fuel_penalty:fr===null?null:fr<0.6,slots:arr(x.api_slot),slot_ex:Number(x.api_slot_ex||-1)};}
+function currentFleet(){return[...S.fleet1,...S.fleet2].map(shipView);}
+function guardState(){const heavy=currentFleet().filter(x=>x.damage.kind==='danger');if(S.uncertain)return{level:'red',heavy,block:true,text:`判定不明: ${S.uncertainReason}`};if(!heavy.length)return{level:'ok',heavy,block:false,text:'大破なし'};const unsafe=heavy.filter(x=>!x.damage_control.protected);if(unsafe.length)return{level:'red',heavy,block:true,text:`大破 ${unsafe.length}隻：ダメコン未確認`};return{level:'yellow',heavy,block:false,text:`大破 ${heavy.length}隻：ダメコン確認済`};}
+function applyGuardDecision(){const g=guardState();if(g.block)showGuard(g);else hideGuard();render();}
+function gameRect(){const frames=[...document.querySelectorAll('iframe')];let f=frames.find(x=>/kancolle-server|203\.104\.209\./i.test(x.src||''))||frames.sort((a,b)=>{const A=a.getBoundingClientRect(),B=b.getBoundingClientRect();return(B.width*B.height)-(A.width*A.height);})[0];if(!f)return null;const r=f.getBoundingClientRect();if(r.width<100||r.height<60)return null;const aspect=1200/720;let w=r.width,h=r.height,left=r.left,top=r.top;if(w/h>aspect){w=h*aspect;left=r.left+(r.width-w)/2;}else{h=w/aspect;top=r.top+(r.height-h)/2;}return{left,top,width:w,height:h,right:left+w,bottom:top+h};}
+function ensureGuard(){if(S.guard?.isConnected)return S.guard;const g=document.createElement('div');g.id='__kcs_safe25_guard';g.style.cssText='position:fixed;z-index:2147483646;display:none;align-items:center;justify-content:center;text-align:center;background:rgba(175,0,24,.91);border:4px solid white;color:white;font:900 clamp(15px,2.5vw,28px)/1.4 -apple-system,BlinkMacSystemFont,sans-serif;touch-action:none;user-select:none;-webkit-user-select:none;animation:kcs25blink .75s steps(2,end) infinite';const st=document.createElement('style');st.textContent='@keyframes kcs25blink{0%,49%{background:#b00020;color:#fff}50%,100%{background:#fff;color:#b00020}}';document.documentElement.appendChild(st);const stop=e=>{e.preventDefault();e.stopPropagation();e.stopImmediatePropagation?.();guardTap();};g.addEventListener('pointerdown',stop,{capture:true});g.addEventListener('click',stop,{capture:true});document.documentElement.appendChild(g);S.guard=g;return g;}
+function showGuard(gs){const g=ensureGuard();S.guardActive=true;S.taps=[];g.innerHTML=`<div>🚨 大破進撃ブロック<br><small>${esc(gs.text)}<br>${C.unlockTripleTap?'3回タップで5秒だけ解除':'設定で解除操作を有効化できます'}</small></div>`;positionGuard();}
+function hideGuard(){S.guardActive=false;S.taps=[];if(S.guard)S.guard.style.display='none';}
+function positionGuard(){if(!S.guard||!S.guardActive)return;const r=gameRect();if(!r){S.guard.style.display='none';return;}const right=clamp(r.left+r.width*C.guardRight,120,window.innerWidth),top=clamp(r.top+r.height*C.guardTop,0,window.innerHeight-80),bottom=clamp(r.top+r.height*C.guardBottom,top+80,window.innerHeight);S.guard.style.left='0px';S.guard.style.top=`${Math.round(top)}px`;S.guard.style.width=`${Math.round(right)}px`;S.guard.style.height=`${Math.round(bottom-top)}px`;S.guard.style.display='flex';}
+function guardTap(){if(!C.unlockTripleTap)return;const now=Date.now();S.taps=S.taps.filter(t=>now-t<2400);S.taps.push(now);if(S.taps.length>=3){S.guard.style.display='none';S.taps=[];setTimeout(()=>{if(S.guardActive)positionGuard();},5000);}}
+window.addEventListener('resize',positionGuard,{passive:true});visualViewport?.addEventListener('resize',positionGuard,{passive:true});visualViewport?.addEventListener('scroll',positionGuard,{passive:true});
+function condText(c){if(c==null)return'?';if(c>=50)return`✨${c}`;if(c>=40)return`${c}`;if(c>=30)return`△${c}`;if(c>=20)return`🟠${c}`;return`🔴${c}`;}
+function pct(v){return v==null?'?':`${Math.round(v*100)}%`;}
+function fleetHtml(){const rows=currentFleet().map(x=>`<tr class="${x.damage.kind}"><td>${esc(x.name)} Lv${x.lv}</td><td>${x.hp?`${x.hp.now}/${x.hp.max}`:'?'} ${x.damage.text}</td><td>${condText(x.cond)}</td><td>${x.fuel??'?'} / ${x.fuel_max??'?'} (${pct(x.fuel_ratio)})${x.fuel_penalty?' ⚠燃料':''}</td><td>${x.ammo??'?'} / ${x.ammo_max??'?'} (${pct(x.ammo_ratio)})${x.ammo_damage_modifier!=null&&x.ammo_damage_modifier<1?` ⚠与ダメ目安${Math.round(x.ammo_damage_modifier*100)}%`:''}</td><td>${x.damage_control.verified?(x.damage_control.protected?'🟡'+x.damage_control.label:'—'):'⚠'+x.damage_control.label}</td></tr>`).join('');return`<div class="note">燃料/弾薬は最後にサーバーから受信した艦データ基準。推測値で現在値を偽装しません。</div><table><thead><tr><th>艦</th><th>HP</th><th>Cond</th><th>燃料</th><th>弾薬</th><th>ダメコン</th></tr></thead><tbody>${rows||'<tr><td colspan="6">母港→編成を表示してください</td></tr>'}</tbody></table>`;}
+function coverage(){const qPages=Number(S.questMeta.page_count||0);return[['マスター',S.master.ships.size>0],['提督',Object.keys(S.basic||{}).length>0],['艦娘',S.ships.size>0],['装備',S.slots.size>0],['艦隊',S.decks.size>0],['資源',S.material.length>0],['資材/アイテム',S.useitems.length>0],['入渠',S.ndocks.length>0],['建造',S.kdocks.length>0],['遠征',Object.keys(S.missions||{}).length>0],['任務全頁',qPages>0&&S.questPages.size>=qPages],['海域',S.mapinfo.length>0],['基地航空隊',S.airBases.size>0],['出撃ログ',!!S.sortie||S.completedSorties.length>0]];}
+function dataHtml(){const c=coverage(),done=c.filter(x=>x[1]).length;return`<div class="big">取得 ${done}/${c.length}</div><div class="badges">${c.map(([n,o])=>`<span>${o?'✅':'❌'}${n}</span>`).join('')}</div><div class="note">基地 ${S.airBases.size} / 任務頁 ${S.questPages.size}/${S.questMeta.page_count||'?'} / API ${S.apiCount}<br>完全取得は追加APIを送らず、必要画面を手動表示してゲーム自身の通常通信を受動取得します。</div>`;}
+function settingsHtml(){return`<div class="set"><label>ブロッカー右端 <input data-c="guardRight" type="range" min="0.25" max="1" step="0.01" value="${C.guardRight}"> ${Math.round(C.guardRight*100)}%</label><label>上端 <input data-c="guardTop" type="range" min="0" max="0.7" step="0.01" value="${C.guardTop}"></label><label>下端 <input data-c="guardBottom" type="range" min="0.3" max="1" step="0.01" value="${C.guardBottom}"></label><label><input data-c="unlockTripleTap" type="checkbox" ${C.unlockTripleTap?'checked':''}> 3回タップで5秒解除</label><button data-a="preview">ブロッカー確認</button><div class="note">左端は常にブラウザ画面端(0px)固定。拡大率やゲーム表示位置に関係なく左側へ隙間を作りません。</div></div>`;}
+function ensureUi(){if(S.ui||!document.documentElement)return;const host=document.createElement('div');host.id='__kcs_safe25_ui';host.style.cssText='position:fixed;right:8px;top:52px;z-index:2147483645;font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif';const root=host.attachShadow({mode:'open'});root.innerHTML=`<style>*{box-sizing:border-box}button{font:inherit}.chip{border:2px solid #fff;border-radius:999px;padding:9px 13px;font-weight:900;min-height:42px;box-shadow:0 3px 12px #0008}.chip.ok{background:#254d34;color:#fff}.chip.yellow{background:#f4c430;color:#111}.chip.red{background:#b00020;color:#fff;animation:blink .75s steps(2,end) infinite}@keyframes blink{50%{background:#fff;color:#b00020;border-color:#b00020}}.panel{display:none;position:fixed;right:8px;top:98px;width:min(96vw,760px);max-height:82vh;overflow:auto;background:#15171df5;color:#fff;border:1px solid #ffffff44;border-radius:14px;padding:12px;box-shadow:0 10px 30px #0009;font-size:12px}.panel.open{display:block}.top{display:flex;gap:6px;align-items:center;position:sticky;top:-12px;background:#15171df8;padding:8px 0;z-index:2}.top b{flex:1;font-size:15px}.btn,.set button{border:1px solid #ffffff44;border-radius:8px;background:#2a2d36;color:#fff;padding:8px 10px}.tabs{display:flex;gap:6px;margin:6px 0}.tabs button.on{background:#fff;color:#111}table{width:100%;border-collapse:collapse}th,td{padding:6px;border-bottom:1px solid #ffffff22;text-align:left;white-space:nowrap}.danger td{background:#5d1420}.warn td{background:#59451b}.note{opacity:.8;line-height:1.55;margin:7px 0}.badges{display:flex;flex-wrap:wrap;gap:7px;line-height:1.8}.big{font-size:18px;font-weight:900}.set{display:grid;gap:12px}.set label{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center}</style><button class="chip ok" data-a="toggle">⚓ 待機</button><div class="panel"><div class="top"><b>艦これ Safety v${VERSION}</b><button class="btn" data-a="shot">📷スクショ</button><button class="btn" data-a="export">💾書き出し</button><button class="btn" data-a="close">閉じる</button></div><div class="tabs"><button class="btn" data-tab="fleet">艦隊</button><button class="btn" data-tab="data">取得状況</button><button class="btn" data-tab="settings">ブロッカー調整</button></div><div class="body"></div></div>`;(document.body||document.documentElement).appendChild(host);S.ui={host,root};root.addEventListener('click',uiClick);root.addEventListener('input',uiInput);render();}
+function openPanel(on=true){ensureUi();S.ui?.root.querySelector('.panel')?.classList.toggle('open',on);}
+function uiClick(e){const a=e.target?.dataset?.a,t=e.target?.dataset?.tab;if(t){S.tab=t;render();return;}if(a==='toggle'){S.ui.root.querySelector('.panel').classList.toggle('open');}else if(a==='close')openPanel(false);else if(a==='export')exportDb();else if(a==='shot')takeScreenshot();else if(a==='preview'){S.guardActive=true;ensureGuard().innerHTML='<div>ブロッカー範囲プレビュー<br><small>左端は常に画面端</small></div>';positionGuard();setTimeout(()=>{if(!S.choice)hideGuard();else applyGuardDecision();},3000);}}
+function uiInput(e){const k=e.target?.dataset?.c;if(!k)return;if(k==='unlockTripleTap')C[k]=!!e.target.checked;else C[k]=Number(e.target.value);saveCfg();positionGuard();render();}
+function render(){ensureUi();if(!S.ui)return;const gs=guardState(),chip=S.ui.root.querySelector('.chip');chip.className=`chip ${gs.level==='red'?'red':gs.level==='yellow'?'yellow':'ok'}`;chip.textContent=gs.level==='red'?'🚨 大破':gs.level==='yellow'?'⚠ 大破(ダメコン)':'⚓ '+(S.sortie?'出撃中':'待機');S.ui.root.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('on',b.dataset.tab===S.tab));S.ui.root.querySelector('.body').innerHTML=S.tab==='fleet'?fleetHtml():S.tab==='data'?dataHtml():settingsHtml();}
+function boot(){const f=()=>{ensureUi();render();};if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',f,{once:true});else f();}
+function materialObject(){const names={1:'fuel',2:'ammo',3:'steel',4:'bauxite',5:'instant_build',6:'bucket',7:'dev_material',8:'screw'},o={};for(const x of S.material)o[names[Number(x?.api_id)]||String(x?.api_id)]=Number(x?.api_value||0);return o;}
+function buildDb(){const memberRaw=Object.fromEntries([...S.memberRaw.entries()].sort(([a],[b])=>a.localeCompare(b))),latest=Object.fromEntries([...S.latestRaw.entries()].filter(([p])=>p!=='/kcsapi/api_start2/getData').sort(([a],[b])=>a.localeCompare(b)));return{generated_at:new Date().toISOString(),meta:{name:'かんこれDB',version:VERSION,source:'Safari passive observer',passive_only:true,no_extra_requests:true,no_automation:true,request_body_saved:false,api_token_saved:false,cookie_saved:false},status:{ships:S.ships.size,equipment:S.slots.size,decks:S.decks.size,quests:S.quests.size,air_bases:S.airBases.size,maps:S.mapinfo.length,coverage:coverage().map(([name,ok])=>({name,ok}))},master:S.master.raw||{},member:{basic:S.basic,ships:[...S.ships.values()],slot_items:[...S.slots.values()],decks:[...S.decks.values()],material:S.material,material_named:materialObject(),useitems:S.useitems,ndocks:S.ndocks,kdocks:S.kdocks,missions:S.missions,mapinfo:S.mapinfo,air_bases:[...S.airBases.values()],air_base_expanded_info:[...S.airExpanded.values()],quests:[...S.quests.values()].sort((a,b)=>Number(a.api_no)-Number(b.api_no)),quest_meta:{...S.questMeta,pages_captured:[...S.questPages].sort((a,b)=>a-b)},raw_get_member:memberRaw},fleet_snapshot:{sortie_deck:S.sortieDeck,combined:S.combined,ships:currentFleet()},sortie:{active:S.sortie,completed_this_session:S.completedSorties},session:{api_count:S.apiCount,latest_responses:latest,captured_at:Object.fromEntries([...S.capturedAt.entries()].sort(([a],[b])=>a.localeCompare(b)))},security:{note:'No request body, api_token or Cookie is exported. The tool does not create game-server requests or automate gameplay.'}};}
+function stamp(){const d=new Date(),p=n=>String(n).padStart(2,'0');return`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;}
+function downloadBlob(blob,name){const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=name;a.style.display='none';document.documentElement.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),30000);}
+function exportDb(){downloadBlob(new Blob([JSON.stringify(buildDb(),null,2)],{type:'application/json'}),`かんこれDB_${stamp()}.json`);}
+async function takeScreenshot(){const requestId=`${Date.now()}_${Math.random().toString(36).slice(2)}`,frame=[...document.querySelectorAll('iframe')].find(x=>/kancolle-server|203\.104\.209\./i.test(x.src||''));if(!frame?.contentWindow){alert('艦これゲームframeを確認できません');return;}try{const blob=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{S.screenshotPending.delete(requestId);reject(new Error('timeout'));},4000);S.screenshotPending.set(requestId,{resolve,reject,timer});frame.contentWindow.postMessage({[SHOT_REQ]:{requestId}},'*');});downloadBlob(blob,`かんこれSS_${stamp()}.png`);}catch(e){alert(`スクショ取得失敗: ${e.message}\nブラウザのCanvas保護により取得できない場合があります。`);}}
 })();
