@@ -8,21 +8,14 @@ iPhone / iPad Safari + Userscripts、および Chrome + Tampermonkey 向けの�
 
 v2.5はリスクを最小化するため、ゲームサーバーへの追加リクエスト、API再送、通信改変、自動操作、マクロ、BOTを設計上禁止しています。ゲーム本体が通常操作で受信したレスポンスだけを受動観測します。`api_token`、Cookie、ログイン情報、request bodyは保存・出力しません。
 
-## 現行ファイル
+## 現行ファイル — この2本だけ
 
-### Safari / iPhone / iPad
-Userscriptsでは次の **2ファイルだけ** を有効にしてください。
+Safari / Userscripts と Chrome / Tampermonkey で **同じ2ファイル** を使います。
 
 1. `kancolle-page-bridge.user.js` — 通常通信の受動観測
 2. `kancolle-safety.user.js` — Safety UI、大破ブロッカー、DB出力、スクリーンショット
 
-### Chrome / Tampermonkey
-Chromeでは次の **2ファイルだけ** をTampermonkeyへ登録してください。
-
-1. `kancolle-page-bridge.chrome.user.js`
-2. `kancolle-safety.chrome.user.js`
-
-Safari用とChrome用は同時に入れる必要はありません。
+`.chrome.user.js` の複製ラッパーはv2.5では廃止しました。ルートにある上記2本が唯一の現行Userscriptです。
 
 ## 主な機能
 
@@ -53,14 +46,14 @@ Safari用とChrome用は同時に入れる必要はありません。
 
 1. App StoreからUserscriptsをインストール
 2. 設定 → アプリ → Safari → 機能拡張 → Userscriptsを有効化
-3. Safari用の2ファイルをUserscriptsの保存フォルダへ保存
+3. 上記2ファイルをUserscriptsの保存フォルダへ保存
 4. DMM / 艦これゲームサーバーでUserscriptsの実行を許可
 5. 艦これを完全に再読み込み
 6. 右上に `⚓ 待機` が表示されればUI起動成功
 
 ## Chrome
 
-TampermonkeyにChrome用の2ファイルを登録して有効化し、艦これを完全に再読み込みしてください。Chrome/Tampermonkey側でユーザースクリプト実行許可が必要な環境では、その設定も有効にしてください。
+Tampermonkeyへ **同じ2ファイルの内容をそれぞれ登録**して有効化し、艦これを完全に再読み込みしてください。Chrome/Tampermonkey側でユーザースクリプト実行許可が必要な環境では、その設定も有効にしてください。
 
 ## 安全性CI
 
