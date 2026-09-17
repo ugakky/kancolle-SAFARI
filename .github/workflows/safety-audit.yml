@@ -5,15 +5,18 @@ on:
     paths:
       - 'kancolle-page-bridge.user.js'
       - 'kancolle-safety.user.js'
-      - 'kancolle-audit-export.user.js'
+      - 'kancolle-page-bridge.chrome.user.js'
+      - 'kancolle-safety.chrome.user.js'
       - 'scripts/safety-audit.mjs'
       - '.github/workflows/safety-audit.yml'
   pull_request:
     paths:
       - 'kancolle-page-bridge.user.js'
       - 'kancolle-safety.user.js'
-      - 'kancolle-audit-export.user.js'
+      - 'kancolle-page-bridge.chrome.user.js'
+      - 'kancolle-safety.chrome.user.js'
       - 'scripts/safety-audit.mjs'
+      - '.github/workflows/safety-audit.yml'
 
 permissions:
   contents: read
@@ -30,6 +33,7 @@ jobs:
         run: |
           node --check kancolle-page-bridge.user.js
           node --check kancolle-safety.user.js
-          node --check kancolle-audit-export.user.js
+          node --check kancolle-page-bridge.chrome.user.js
+          node --check kancolle-safety.chrome.user.js
       - name: Passive-only invariant audit
         run: node scripts/safety-audit.mjs
