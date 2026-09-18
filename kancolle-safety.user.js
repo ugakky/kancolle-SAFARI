@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         艦これ Safari Safety v2.5
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      2.5.1
+// @version      2.5.2
 // @description  受動API表示・大破警告・ダメコン判定・画面端ブロッカー・艦これDB書き出し・ローカルスクショ
 // @match        *://*.dmm.com/*
 // @run-at       document-start
@@ -12,7 +12,7 @@
 
 (() => {
 'use strict';
-const VERSION='2.5.1';
+const VERSION='2.5.2';
 const API_MSG='__KCS_SAFE25_API__', SHOT_REQ='__KCS_SAFE25_SCREENSHOT_REQ__', SHOT_RES='__KCS_SAFE25_SCREENSHOT_RES__';
 const CFG_KEY='__KCS_SAFE25_CONFIG__';
 const DEFAULT_CFG={guardRight:0.58,guardTop:0.08,guardBottom:0.96,unlockTripleTap:true};
@@ -50,7 +50,7 @@ function isBattle(p){return /\/api_req_(sortie|combined_battle|battle_midnight)\
 function readBattle(p,d){refreshFleets();const order=[...S.fleet1,...S.fleet2];for(const id of order)if(damage(hp(id)).kind==='danger'&&damageControl(id).protected)S.dcUncertain.add(id);if(!Array.isArray(d?.api_f_nowhps)||!Array.isArray(d?.api_f_maxhps)){S.uncertain=true;S.uncertainReason=`HP配列なし: ${pathTail(p)}`;return;}const n1=hpArray(d.api_f_nowhps),m1=hpArray(d.api_f_maxhps),n2=hpArray(d.api_f_nowhps_combined),m2=hpArray(d.api_f_maxhps_combined),now=[...n1,...n2].map(x=>Math.max(0,Number(x)||0)),max=[...m1,...m2];if(order.length<Math.min(now.length,6)){S.uncertain=true;S.uncertainReason='艦隊とHPの対応を確認できません';return;}indexed(now,d.api_kouku?.api_stage3?.api_fdam,0);indexed(now,d.api_kouku?.api_stage3_combined?.api_fdam,6);indexed(now,d.api_kouku_combined?.api_stage3?.api_fdam,6);indexed(now,d.api_opening_atack?.api_fdam,0);shell(now,d.api_opening_taisen);shell(now,d.api_hougeki1);shell(now,d.api_hougeki2);shell(now,d.api_hougeki3);shell(now,d.api_hougeki);shell(now,d.api_n_hougeki1);shell(now,d.api_n_hougeki2);indexed(now,d.api_raigeki?.api_fdam,0);indexed(now,d.api_raigeki_combined?.api_fdam,6);for(let i=0;i<Math.min(order.length,now.length,max.length);i++)S.hpAfter.set(order[i],{now:Math.max(0,Math.trunc(now[i])),max:Math.max(1,Math.trunc(max[i])),source:'battle-calc'});S.uncertain=false;S.uncertainReason='';if(S.sortie)S.sortie.events.push(eventLite(p,d));}
 function indexed(hp,a,off=0){if(!Array.isArray(a))return;a.forEach((v,i)=>{const n=Number(v),k=i+off;if(Number.isFinite(n)&&n>0&&k<hp.length)hp[k]-=Math.trunc(n);});}
 function shell(hp,h){if(!h||!Array.isArray(h.api_df_list)||!Array.isArray(h.api_damage))return;const ef=h.api_at_eflag;for(let i=0;i<Math.min(h.api_df_list.length,h.api_damage.length);i++){if(Array.isArray(ef)&&Number(ef[i])!==1)continue;const ts=arr(h.api_df_list[i]),ds=arr(h.api_damage[i]);for(let z=0;z<Math.min(ts.length,ds.length);z++){let k=Number(ts[z]),n=Number(ds[z]);if(!Number.isFinite(k)||!Number.isFinite(n)||n<=0)continue;if(!Array.isArray(ef)){if(k<1||k>6)continue;k--;}if(k>=0&&k<hp.length)hp[k]-=Math.trunc(n);}}}
-function battleResult(p,d){S.choice=true;if(S.sortie)S.sortie.events.push(eventLite(p,d));applyGuardDecision();S.tab='fleet';openPanel(true);}
+function battleResult(p,d){S.choice=true;if(S.sortie)S.sortie.events.push(eventLite(p,d));applyGuardDecision();}
 function endChoice(){S.choice=false;S.hpAfter.clear();S.dcUncertain.clear();hideGuard();}
 function hp(id){if(S.hpAfter.has(id))return S.hpAfter.get(id);const x=S.ships.get(Number(id));return Number.isFinite(x?.api_nowhp)?{now:Number(x.api_nowhp),max:Number(x.api_maxhp),source:'server'}:null;}
 function damage(h){if(!h||!Number.isFinite(h.now)||!Number.isFinite(h.max))return{text:'不明',kind:'unknown'};if(h.now<=0||h.now*4<=h.max)return{text:'大破',kind:'danger'};if(h.now*2<=h.max)return{text:'中破',kind:'warn'};if(h.now*4<=h.max*3)return{text:'小破',kind:'minor'};return{text:'健在',kind:'ok'};}
