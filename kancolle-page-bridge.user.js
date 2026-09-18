@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         艦これ Safety Bridge v2.5
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      2.5.0
+// @version      2.5.3
 // @description  通常プレイで受信した状態データだけをローカル転送する受動Bridge。追加通信・自動操作なし
 // @match        *://*.kancolle-server.com/*
 // @include      *://203.104.209.*/*
@@ -13,7 +13,7 @@
 
 (() => {
   'use strict';
-  const VERSION='2.5.0';
+  const VERSION='2.5.3';
   const API_MSG='__KCS_SAFE25_API__';
   const SHOT_REQ='__KCS_SAFE25_SCREENSHOT_REQ__';
   const SHOT_RES='__KCS_SAFE25_SCREENSHOT_RES__';
@@ -23,8 +23,9 @@
   // SECURITY INVARIANTS
   // 1) このスクリプト自身は XMLHttpRequest/fetch を一度も新規発行しない。
   // 2) ゲームのリクエスト/レスポンスを書き換えない。
-  // 3) request body は保存・転送しない。api_token/api_verno等の認証情報は上位frameへ出さない。
-  // 4) 自動クリック・自動出撃・自動進撃・自動撤退をしない。
+  // 3) request body は保存・転送しない。必要な非機密フィールドだけallowlistで抽出する。
+  // 4) api_token/api_verno等の認証情報は上位frameへ出さない。
+  // 5) 自動クリック・自動出撃・自動進撃・自動撤退をしない。
 
   const pathOf=url=>{try{return new URL(String(url||''),location.href).pathname;}catch(_){return '';}};
   function relevant(path){
@@ -47,12 +48,20 @@
   }
   function parse(raw){try{return JSON.parse(String(raw||'').replace(/^svdata=/,''));}catch(_){return null;}}
   function safeMeta(path,body){
-    // 必要最小限。api_token等はallowlistに存在しないため転送不能。
-    if(path!=='/kcsapi/api_req_map/start') return {};
+    // request bodyそのものは保存しない。機能上必要な数値だけpath別allowlistで抽出する。
+    const allow={
+      '/kcsapi/api_req_map/start':['api_deck_id','api_maparea_id','api_mapinfo_no','api_formation_id'],
+      '/kcsapi/api_get_member/questlist':['api_page_no','api_tab_id'],
+      '/kcsapi/api_get_member/base_air_corps':['api_area_id']
+    }[path];
+    if(!allow) return {};
     try{
       const p=new URLSearchParams(typeof body==='string'?body:'');
       const out={};
-      for(const k of ['api_deck_id','api_maparea_id','api_mapinfo_no','api_formation_id']) if(p.has(k)) out[k]=Number(p.get(k));
+      for(const k of allow) if(p.has(k)){
+        const n=Number(p.get(k));
+        if(Number.isFinite(n)) out[k]=n;
+      }
       return out;
     }catch(_){return {};}
   }
