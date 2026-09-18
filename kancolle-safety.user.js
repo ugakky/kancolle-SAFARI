@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         艦これ Safari Safety v2.5
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      2.5.3
+// @version      2.5.4
 // @description  受動API表示・大破警告・ダメコン判定・画面端ブロッカー・艦これDB書き出し・ローカルスクショ
 // @match        *://*.dmm.com/*
 // @run-at       document-start
@@ -13,10 +13,10 @@
 (() => {
 'use strict';
 
-const VERSION='2.5.3';
+const VERSION='2.5.4';
 const API_MSG='__KCS_SAFE25_API__', SHOT_REQ='__KCS_SAFE25_SCREENSHOT_REQ__', SHOT_RES='__KCS_SAFE25_SCREENSHOT_RES__';
 const CFG_KEY='__KCS_SAFE25_CONFIG__';
-const DEFAULT_CFG={guardRight:0.58,guardTop:0.08,guardBottom:0.96,unlockTripleTap:true};
+const DEFAULT_CFG={guardRight:0.58,guardTop:0.08,guardBottom:0.96};
 const clamp=(v,a,b)=>Math.min(b,Math.max(a,Number(v)));
 const arr=v=>Array.isArray(v)?v:[];
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -36,7 +36,7 @@ const S={
   combined:0,sortieDeck:1,fleet1:[],fleet2:[],hpAfter:new Map(),dcUncertain:new Set(),
   sortie:null,completedSorties:[],apiCount:0,lastApi:'',bridge:false,
   uncertain:false,uncertainReason:'',choice:false,guard:null,guardActive:false,taps:[],
-  ui:null,tab:'fleet',screenshotPending:new Map(),
+  ui:null,tab:'fleet',screenshotPending:new Map(),gameWindow:null,
   material:[],useitems:[],basic:{},ndocks:[],kdocks:[],missions:{},mapinfo:[]
 };
 
@@ -47,6 +47,7 @@ window.addEventListener('message',e=>{
       const h=new URL(e.origin).hostname;
       if(!/(^|\.)kancolle-server\.com$/i.test(h)&&!/^203\.104\.209\.\d+$/.test(h))return;
     }catch(_){return;}
+    S.gameWindow=e.source||S.gameWindow;
     onApi(d);
     return;
   }
@@ -138,6 +139,8 @@ function ingestDecks(list){if(!Array.isArray(list))return;for(const x of list)if
 function mergeMapInfo(d){
   const list=Array.isArray(d)?d:arr(d?.api_map_info||d?.api_mapinfo);
   if(list.length)S.mapinfo=list;
+  // mapinfo itself carries api_air_base on current Kancolle. Capture it passively here too.
+  mergeBases(d?.api_air_base||d?.api_air_base_corps||[],{});
   for(const x of arr(d?.api_air_base_expanded_info)){
     const area=Number(x?.api_area_id||x?.api_maparea_id||0),rid=Number(x?.api_rid||x?.api_id||0);
     if(area>0)S.airAreas.add(area);
@@ -148,6 +151,7 @@ function baseList(d){
   if(Array.isArray(d))return d;
   if(Array.isArray(d?.api_base_air_corps))return d.api_base_air_corps;
   if(Array.isArray(d?.api_air_base_corps))return d.api_air_base_corps;
+  if(Array.isArray(d?.api_air_base))return d.api_air_base;
   if(Array.isArray(d?.api_list))return d.api_list;
   if(d&&typeof d==='object'&&(d.api_area_id||d.api_rid)&&d.api_plane_info)return[d];
   return[];
@@ -338,11 +342,11 @@ function ensureGuard(){
   g.style.cssText='position:fixed;z-index:2147483646;display:none;align-items:center;justify-content:center;text-align:center;background:rgba(176,0,32,.48);border:3px solid rgba(255,255,255,.9);color:white;font:900 clamp(15px,2.5vw,28px)/1.4 -apple-system,BlinkMacSystemFont,sans-serif;touch-action:none;user-select:none;-webkit-user-select:none;';
   const st=document.createElement('style');st.textContent='#__kcs_safe25_guard .guard-dismiss{position:absolute;right:0;top:50%;transform:translate(50%,-50%);z-index:2;border:2px solid #fff;border-radius:999px;background:#2a2d36;color:#fff;padding:10px 12px;font:800 13px/1 -apple-system,BlinkMacSystemFont,sans-serif;box-shadow:0 2px 10px #0009;white-space:nowrap;touch-action:manipulation}';
   document.documentElement.appendChild(st);
-  const stop=e=>{e.preventDefault();e.stopPropagation();e.stopImmediatePropagation?.();if(e.target?.closest?.('[data-guard-dismiss]')){temporarilyHideGuard();return;}guardTap();};
+  const stop=e=>{e.preventDefault();e.stopPropagation();e.stopImmediatePropagation?.();if(e.target?.closest?.('[data-guard-dismiss]')){dismissGuard();return;}guardTap();};
   g.addEventListener('pointerdown',stop,{capture:true});g.addEventListener('click',stop,{capture:true});
   document.documentElement.appendChild(g);S.guard=g;return g;
 }
-function showGuard(gs){const g=ensureGuard();S.guardActive=true;S.taps=[];g.innerHTML=`<div>🚨 大破進撃ブロック<br><small>${esc(gs.text)}<br>赤い範囲では進撃操作を遮断します</small></div><button type="button" class="guard-dismiss" data-guard-dismiss>5秒非表示</button>`;positionGuard();}
+function showGuard(gs){const g=ensureGuard();S.guardActive=true;S.taps=[];g.innerHTML=`<div>🚨 大破進撃ブロック<br><small>${esc(gs.text)}<br>赤い範囲では進撃操作を遮断します</small></div><button type="button" class="guard-dismiss" data-guard-dismiss>解除</button>`;positionGuard();}
 function hideGuard(){S.guardActive=false;S.taps=[];if(S.guard)S.guard.style.display='none';}
 function positionGuard(){
   if(!S.guard||!S.guardActive)return;const r=gameRect();if(!r){S.guard.style.display='none';return;}
@@ -350,7 +354,8 @@ function positionGuard(){
   S.guard.style.left='0px';S.guard.style.top=`${Math.round(top)}px`;S.guard.style.width=`${Math.round(right)}px`;S.guard.style.height=`${Math.round(bottom-top)}px`;S.guard.style.display='flex';
 }
 function temporarilyHideGuard(){if(!S.guardActive||!S.guard)return;S.guard.style.display='none';S.taps=[];setTimeout(()=>{if(S.guardActive)positionGuard();},5000);}
-function guardTap(){if(!C.unlockTripleTap)return;const now=Date.now();S.taps=S.taps.filter(t=>now-t<2400);S.taps.push(now);if(S.taps.length>=3)temporarilyHideGuard();}
+function dismissGuard(){S.guardActive=false;S.taps=[];if(S.guard)S.guard.style.display='none';}
+function guardTap(){const now=Date.now();S.taps=S.taps.filter(t=>now-t<2400);S.taps.push(now);if(S.taps.length>=3)temporarilyHideGuard();}
 window.addEventListener('resize',positionGuard,{passive:true});visualViewport?.addEventListener('resize',positionGuard,{passive:true});visualViewport?.addEventListener('scroll',positionGuard,{passive:true});
 
 function condText(c){if(c==null)return'?';if(c>=50)return`✨${c}`;if(c>=40)return`${c}`;if(c>=30)return`△${c}`;if(c>=20)return`🟠${c}`;return`🔴${c}`;}
@@ -371,7 +376,7 @@ function dataHtml(){
   const c=coverage(),done=c.filter(x=>x[1]).length;
   return`<div class="big">取得 ${done}/${c.length}</div><div class="badges">${c.map(([n,o])=>`<span>${o?'✅':'❌'}${n}</span>`).join('')}</div><div class="note">基地 ${S.airBases.size} (方面 ${[...S.airAreas].sort((a,b)=>a-b).join(',')||'未取得'}) / 任務 ${S.quests.size}件・表示 ${S.questViews.size} / API ${S.apiCount}<br>任務は「全て」タブ、基地航空隊は基地のある各方面を通常操作で表示してください。追加APIは送信しません。</div>`;
 }
-function settingsHtml(){return`<div class="set"><label>ブロッカー右端 <input data-c="guardRight" type="range" min="0.25" max="1" step="0.01" value="${C.guardRight}"> ${Math.round(C.guardRight*100)}%</label><label>上端 <input data-c="guardTop" type="range" min="0" max="0.7" step="0.01" value="${C.guardTop}"></label><label>下端 <input data-c="guardBottom" type="range" min="0.3" max="1" step="0.01" value="${C.guardBottom}"></label><label><input data-c="unlockTripleTap" type="checkbox" ${C.unlockTripleTap?'checked':''}> 3回タップで5秒解除</label><button data-a="preview">ブロッカー確認</button><div class="note">左端は常にブラウザ画面端(0px)固定。拡大率やゲーム表示位置に関係なく左側へ隙間を作りません。</div></div>`;}
+function settingsHtml(){return`<div class="set"><label>ブロッカー右端 <input data-c="guardRight" type="range" min="0.25" max="1" step="0.01" value="${C.guardRight}"> ${Math.round(C.guardRight*100)}%</label><label>上端 <input data-c="guardTop" type="range" min="0" max="0.7" step="0.01" value="${C.guardTop}"></label><label>下端 <input data-c="guardBottom" type="range" min="0.3" max="1" step="0.01" value="${C.guardBottom}"></label><div class="note">ブロッカー上を3回タップすると5秒だけ一時解除。右端の「解除」はその警告中のブロッカーを解除します。</div><button data-a="preview">ブロッカー確認</button><div class="note">左端は常にブラウザ画面端(0px)固定。拡大率やゲーム表示位置に関係なく左側へ隙間を作りません。</div></div>`;}
 
 function ensureUi(){
   if(S.ui||!document.documentElement)return;
@@ -389,11 +394,11 @@ function uiClick(e){
   else if(a==='export')exportDb();
   else if(a==='shot')takeScreenshot();
   else if(a==='preview'){
-    S.guardActive=true;ensureGuard().innerHTML='<div>ブロッカー範囲プレビュー<br><small>左端は常に画面端</small></div><button type="button" class="guard-dismiss" data-guard-dismiss>5秒非表示</button>';
+    S.guardActive=true;ensureGuard().innerHTML='<div>ブロッカー範囲プレビュー<br><small>左端は常に画面端</small></div><button type="button" class="guard-dismiss" data-guard-dismiss>解除</button>';
     positionGuard();setTimeout(()=>{if(!S.choice)hideGuard();else applyGuardDecision();},3000);
   }
 }
-function uiInput(e){const k=e.target?.dataset?.c;if(!k)return;if(k==='unlockTripleTap')C[k]=!!e.target.checked;else C[k]=Number(e.target.value);saveCfg();positionGuard();render();}
+function uiInput(e){const k=e.target?.dataset?.c;if(!k)return;C[k]=Number(e.target.value);saveCfg();positionGuard();render();}
 function render(){
   ensureUi();if(!S.ui)return;const gs=guardState(),chip=S.ui.root.querySelector('.chip');
   chip.className=`chip ${gs.level==='red'?'red':gs.level==='yellow'?'yellow':'ok'}`;
@@ -433,10 +438,13 @@ function stamp(){const d=new Date(),p=n=>String(n).padStart(2,'0');return`${d.ge
 function downloadBlob(blob,name){const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=name;a.style.display='none';document.documentElement.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),30000);}
 function exportDb(){downloadBlob(new Blob([JSON.stringify(buildDb(),null,2)],{type:'application/json'}),`かんこれDB_${stamp()}.json`);}
 async function takeScreenshot(){
-  const requestId=`${Date.now()}_${Math.random().toString(36).slice(2)}`,frame=[...document.querySelectorAll('iframe')].find(x=>/kancolle-server|203\.104\.209\./i.test(x.src||''));
-  if(!frame?.contentWindow){alert('艦これゲームframeを確認できません');return;}
+  const requestId=`${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  // Use the exact Window that sent the passive API heartbeat/response. On iOS Safari the
+  // visible DMM iframe src can be a wrapper URL, so searching iframe.src may target the wrong frame.
+  const target=S.gameWindow||[...document.querySelectorAll('iframe')].find(x=>/kancolle-server|203\.104\.209\./i.test(x.src||''))?.contentWindow;
+  if(!target){alert('艦これゲームframeを確認できません。ページを再読込してから試してください。');return;}
   try{
-    const blob=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{S.screenshotPending.delete(requestId);reject(new Error('timeout'));},4000);S.screenshotPending.set(requestId,{resolve,reject,timer});frame.contentWindow.postMessage({[SHOT_REQ]:{requestId}},'*');});
+    const blob=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{S.screenshotPending.delete(requestId);reject(new Error('timeout'));},4000);S.screenshotPending.set(requestId,{resolve,reject,timer});target.postMessage({[SHOT_REQ]:{requestId}},'*');});
     downloadBlob(blob,`かんこれSS_${stamp()}.png`);
   }catch(e){alert(`スクショ取得失敗: ${e.message}\nブラウザのCanvas保護により取得できない場合があります。`);}
 }
