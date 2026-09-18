@@ -7,8 +7,8 @@ const failures = [];
 const must = (ok, msg) => { if (!ok) failures.push(msg); };
 const count = (s, needle) => s.split(needle).length - 1;
 
-must(/@version\s+2\.5\.1/.test(bridge), 'bridge version is not 2.5.0');
-must(/@version\s+2\.5\.1/.test(ui), 'UI version is not 2.5.0');
+must(/@version\s+2\.5\.2/.test(bridge), 'bridge version is not 2.5.0');
+must(/@version\s+2\.5\.2/.test(ui), 'UI version is not 2.5.0');
 must(!bridge.includes('new XMLHttpRequest'), 'bridge creates a new XMLHttpRequest');
 must(!bridge.includes('GM_xmlhttpRequest'), 'bridge uses GM_xmlhttpRequest');
 must(!bridge.includes('GM_cookie'), 'bridge accesses GM_cookie');
@@ -32,4 +32,4 @@ if (failures.length) {
   for (const f of failures) console.error(` - ${f}`);
   process.exit(1);
 }
-console.log('Safety audit PASS: v2.5.1 passive-only invariants satisfied.');
+console.log('Safety audit PASS: v2.5.2 passive-only invariants satisfied.');
