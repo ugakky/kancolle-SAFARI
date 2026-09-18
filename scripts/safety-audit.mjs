@@ -7,8 +7,8 @@ const failures = [];
 const must = (ok, msg) => { if (!ok) failures.push(msg); };
 const count = (s, needle) => s.split(needle).length - 1;
 
-must(/@version\s+2\.5\.3/.test(bridge), 'bridge version is not 2.5.3');
-must(/@version\s+2\.5\.3/.test(ui), 'UI version is not 2.5.3');
+must(/@version\s+2\.5\.4/.test(bridge), 'bridge version is not 2.5.3');
+must(/@version\s+2\.5\.4/.test(ui), 'UI version is not 2.5.3');
 must(!bridge.includes('new XMLHttpRequest'), 'bridge creates a new XMLHttpRequest');
 must(!bridge.includes('GM_xmlhttpRequest'), 'bridge uses GM_xmlhttpRequest');
 must(!bridge.includes('GM_cookie'), 'bridge accesses GM_cookie');
@@ -31,6 +31,11 @@ must(!/\bWebSocket\s*\(/.test(ui), 'UI opens WebSocket');
 must(ui.includes('function questsComplete()'), 'quest completeness logic missing');
 must(ui.includes('tab_id===0'), 'all-quest tab completeness check missing');
 must(ui.includes('__safe25_area_id'), 'airbase area preservation missing');
+must(ui.includes('mergeBases(d?.api_air_base'), 'mapinfo api_air_base passive capture missing');
+must(ui.includes('S.gameWindow=e.source'), 'screenshot source-window handshake missing');
+must(ui.includes('target.postMessage'), 'screenshot does not target observed game window');
+must(ui.includes('function dismissGuard()'), 'explicit blocker release missing');
+must(ui.includes('data-guard-dismiss>解除'), 'blocker release button label missing');
 must(ui.includes("finishSortie('goback_port')"), 'goback_port sortie finalization missing');
 must(ui.includes("finishSortie('superseded_by_new_sortie')"), 'new-sortie finalization missing');
 must(ui.includes('unhandledFriendlyDamage'), 'fail-closed unknown damage phase check missing');
@@ -42,4 +47,4 @@ if (failures.length) {
   for (const f of failures) console.error(` - ${f}`);
   process.exit(1);
 }
-console.log('Safety audit PASS: v2.5.3 passive-only and completeness invariants satisfied.');
+console.log('Safety audit PASS: v2.5.4 passive-only and completeness invariants satisfied.');
