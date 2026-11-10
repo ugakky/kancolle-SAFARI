@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         艦これ Safari Safety v2.5
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      2.5.2
+// @version      2.6.0
 // @description  受動API表示・大破警告・ダメコン判定・画面端ブロッカー・艦これDB書き出し・ローカルスクショ
 // @match        *://*.dmm.com/*
 // @run-at       document-start
@@ -12,7 +12,7 @@
 
 (() => {
 'use strict';
-const VERSION='2.5.2';
+const VERSION='2.6.0';
 const API_MSG='__KCS_SAFE25_API__', SHOT_REQ='__KCS_SAFE25_SCREENSHOT_REQ__', SHOT_RES='__KCS_SAFE25_SCREENSHOT_RES__';
 const CFG_KEY='__KCS_SAFE25_CONFIG__';
 const DEFAULT_CFG={guardRight:0.58,guardTop:0.08,guardBottom:0.96,unlockTripleTap:true};
@@ -70,7 +70,33 @@ function guardTap(){if(!C.unlockTripleTap)return;const now=Date.now();S.taps=S.t
 window.addEventListener('resize',positionGuard,{passive:true});visualViewport?.addEventListener('resize',positionGuard,{passive:true});visualViewport?.addEventListener('scroll',positionGuard,{passive:true});
 function condText(c){if(c==null)return'?';if(c>=50)return`✨${c}`;if(c>=40)return`${c}`;if(c>=30)return`△${c}`;if(c>=20)return`🟠${c}`;return`🔴${c}`;}
 function pct(v){return v==null?'?':`${Math.round(v*100)}%`;}
-function fleetHtml(){const rows=currentFleet().map(x=>`<tr class="${x.damage.kind}"><td>${esc(x.name)} Lv${x.lv}</td><td>${x.hp?`${x.hp.now}/${x.hp.max}`:'?'} ${x.damage.text}</td><td>${condText(x.cond)}</td><td>${x.fuel??'?'} / ${x.fuel_max??'?'} (${pct(x.fuel_ratio)})${x.fuel_penalty?' ⚠燃料':''}</td><td>${x.ammo??'?'} / ${x.ammo_max??'?'} (${pct(x.ammo_ratio)})${x.ammo_damage_modifier!=null&&x.ammo_damage_modifier<1?` ⚠与ダメ目安${Math.round(x.ammo_damage_modifier*100)}%`:''}</td><td>${x.damage_control.verified?(x.damage_control.protected?'🟡'+x.damage_control.label:'—'):'⚠'+x.damage_control.label}</td></tr>`).join('');return`<div class="note">燃料/弾薬は最後にサーバーから受信した艦データ基準。推測値で現在値を偽装しません。</div><table><thead><tr><th>艦</th><th>HP</th><th>Cond</th><th>燃料</th><th>弾薬</th><th>ダメコン</th></tr></thead><tbody>${rows||'<tr><td colspan="6">母港→編成を表示してください</td></tr>'}</tbody></table>`;}
+const FLEET_STATS=[['合計Lv','api_lv'],['対空','api_taiku'],['火力','api_karyoku'],['対潜','api_taisen'],['索敵','api_sakuteki']];
+function fleetTotals(id){
+ const deck=S.decks.get(Number(id));
+ if(!deck||!Array.isArray(deck.api_ship))return null;
+ const ids=fleetIds(id),totals={id:Number(id),count:ids.length};
+ for(const [,key] of FLEET_STATS){
+  let sum=0,complete=true;
+  for(const iid of ids){
+   const ship=S.ships.get(iid);
+   const value=key==='api_lv'?ship?.[key]:ship?.[key]?.[0];
+   if(typeof value!=='number'||!Number.isFinite(value)||value<0){complete=false;break;}
+   sum+=value;
+  }
+  totals[key]=complete?sum:null;
+ }
+ return totals;
+}
+function fleetTotalsHtml(){
+ const rows=[1,2,3,4].map(id=>{
+  const totals=fleetTotals(id);
+  const values=FLEET_STATS.map(([,key])=>`<td>${totals?.[key]??'未取得'}</td>`).join('');
+  return `<tr><th scope="row">第${id}艦隊</th>${values}</tr>`;
+ }).join('');
+ return `<h3>第1〜第4艦隊 合計値</h3><div style="overflow-x:auto"><table aria-label="艦隊別合計値"><thead><tr><th>艦隊</th>${FLEET_STATS.map(([label])=>`<th scope="col">${label}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div><div class="note">最後に受信した艦データの現在値を合計。未取得は「未取得」、取得済み空艦隊は0です。装備値は別途加算しません。編成・装備変更後は母港へ戻って更新してください。遠征の必要値との比較・改修補正・成功判定は含みません。</div>`;
+}
+function fleetHtml(){return fleetTotalsHtml()+sortieFleetHtml();}
+function sortieFleetHtml(){const rows=currentFleet().map(x=>`<tr class="${x.damage.kind}"><td>${esc(x.name)} Lv${x.lv}</td><td>${x.hp?`${x.hp.now}/${x.hp.max}`:'?'} ${x.damage.text}</td><td>${condText(x.cond)}</td><td>${x.fuel??'?'} / ${x.fuel_max??'?'} (${pct(x.fuel_ratio)})${x.fuel_penalty?' ⚠燃料':''}</td><td>${x.ammo??'?'} / ${x.ammo_max??'?'} (${pct(x.ammo_ratio)})${x.ammo_damage_modifier!=null&&x.ammo_damage_modifier<1?` ⚠与ダメ目安${Math.round(x.ammo_damage_modifier*100)}%`:''}</td><td>${x.damage_control.verified?(x.damage_control.protected?'🟡'+x.damage_control.label:'—'):'⚠'+x.damage_control.label}</td></tr>`).join('');return`<div class="note">燃料/弾薬は最後にサーバーから受信した艦データ基準。推測値で現在値を偽装しません。</div><table><thead><tr><th>艦</th><th>HP</th><th>Cond</th><th>燃料</th><th>弾薬</th><th>ダメコン</th></tr></thead><tbody>${rows||'<tr><td colspan="6">母港→編成を表示してください</td></tr>'}</tbody></table>`;}
 function coverage(){const qPages=Number(S.questMeta.page_count||0);return[['マスター',S.master.ships.size>0],['提督',Object.keys(S.basic||{}).length>0],['艦娘',S.ships.size>0],['装備',S.slots.size>0],['艦隊',S.decks.size>0],['資源',S.material.length>0],['資材/アイテム',S.useitems.length>0],['入渠',S.ndocks.length>0],['建造',S.kdocks.length>0],['遠征',Object.keys(S.missions||{}).length>0],['任務全頁',qPages>0&&S.questPages.size>=qPages],['海域',S.mapinfo.length>0],['基地航空隊',S.airBases.size>0],['出撃ログ',!!S.sortie||S.completedSorties.length>0]];}
 function dataHtml(){const c=coverage(),done=c.filter(x=>x[1]).length;return`<div class="big">取得 ${done}/${c.length}</div><div class="badges">${c.map(([n,o])=>`<span>${o?'✅':'❌'}${n}</span>`).join('')}</div><div class="note">基地 ${S.airBases.size} / 任務頁 ${S.questPages.size}/${S.questMeta.page_count||'?'} / API ${S.apiCount}<br>完全取得は追加APIを送らず、必要画面を手動表示してゲーム自身の通常通信を受動取得します。</div>`;}
 function settingsHtml(){return`<div class="set"><label>ブロッカー右端 <input data-c="guardRight" type="range" min="0.25" max="1" step="0.01" value="${C.guardRight}"> ${Math.round(C.guardRight*100)}%</label><label>上端 <input data-c="guardTop" type="range" min="0" max="0.7" step="0.01" value="${C.guardTop}"></label><label>下端 <input data-c="guardBottom" type="range" min="0.3" max="1" step="0.01" value="${C.guardBottom}"></label><label><input data-c="unlockTripleTap" type="checkbox" ${C.unlockTripleTap?'checked':''}> 3回タップで5秒解除</label><button data-a="preview">ブロッカー確認</button><div class="note">左端は常にブラウザ画面端(0px)固定。拡大率やゲーム表示位置に関係なく左側へ隙間を作りません。</div></div>`;}

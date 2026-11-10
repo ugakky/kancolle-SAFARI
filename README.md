@@ -1,4 +1,18 @@
-# kancolle-SAFARI — Safety v2.5.1
+# kancolle-SAFARI — Safety v2.6.0
+
+## v2.6.0 艦隊別合計表示
+
+「艦隊」タブの上部に第1〜第4艦隊の合計Lv・対空・火力・対潜・索敵を一覧表示します。
+各艦の受信済み現在値（能力配列の先頭）を合計し、装備値は二重加算しません。
+未取得データを含む項目は「未取得」、取得済みの空艦隊は0です。
+編成・装備変更後は母港に戻り、通常通信でデータを更新してください。
+遠征別の必要値、改修補正、成功判定は含みません。
+
+公開mainのv2.5.2を基にした変更です。手元のv2.5.4との差分は未確認です。
+ブロッカーの位置ずれ修正は含みません。ブロッカーを信用せず大破は手動確認してください。
+更新するファイルは `kancolle-safety.user.js` のみ。Bridgeはv2.5.0のままです。
+追加通信・自動ゲーム操作は追加していません。iPhone実機の表示確認は未実施です。
+検証: `node scripts/fleet-totals-test.mjs` と `node scripts/safety-audit.mjs`。
 
 iPhone / iPad Safari + Userscripts、および Chrome + Tampermonkey 向けの非公式・受動型プレイ補助ツールです。
 
