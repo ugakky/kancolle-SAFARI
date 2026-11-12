@@ -1,0 +1,28 @@
+import fs from 'node:fs';
+import vm from 'node:vm';
+import assert from 'node:assert/strict';
+const messages=[],listeners=[];
+const top={postMessage:m=>messages.push(m)};
+let sends=0;
+class XHR{open(){}send(){sends++;}addEventListener(){}}
+const win={top,addEventListener:(type,fn)=>{if(type==='message')listeners.push(fn);}};
+const bridge=fs.readFileSync('kancolle-page-bridge.user.js','utf8');
+vm.runInNewContext(bridge,{window:win,XMLHttpRequest:XHR,URL,URLSearchParams,location:{href:'https://example.kancolle-server.com/'},console});
+const initial=messages.length;
+for(const fn of listeners)fn({data:{__KCS_SAFE25_HELLO__:true},source:top,origin:'https://play.games.dmm.com'});
+assert.equal(messages.length,initial+1);
+assert.equal(messages.at(-1).__KCS_SAFE25_API__.data.version,'2.6.1');
+for(const fn of listeners)fn({data:{__KCS_SAFE25_HELLO__:true},source:top,origin:'https://evil.example'});
+assert.equal(messages.length,initial+1);
+assert.equal(sends,0,'handshake must not issue server requests');
+const source=fs.readFileSync('kancolle-safety.user.js','utf8').replace('\nboot();','\n').replace(/\}\)\(\);\s*$/, 'globalThis.test={S,guardState,refreshFleets};})();');
+const ctx={console,URL,localStorage:{getItem:()=>null},window:{addEventListener(){}}};
+vm.runInNewContext(source,ctx);
+const {S,guardState,refreshFleets}=ctx.test;
+assert.equal(guardState().level,'yellow');assert.equal(guardState().block,false);
+S.bridge=true;assert.equal(guardState().text,'艦隊データ待ち');
+S.sortie={};assert.equal(guardState().block,true);assert.equal(guardState().level,'red');
+S.decks.set(1,{api_ship:[1]});refreshFleets();S.ships.set(1,{api_nowhp:20,api_maxhp:20,api_slot:[]});
+assert.equal(guardState().level,'ok');
+S.ships.set(1,{api_nowhp:1,api_maxhp:20,api_slot:[]});assert.equal(guardState().block,true);
+console.log('PASS: handshake, untrusted origin rejection, no requests, startup states, missing sortie data, actual damage');

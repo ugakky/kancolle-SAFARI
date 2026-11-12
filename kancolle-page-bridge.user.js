@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         艦これ Safety Bridge v2.5
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      2.5.0
+// @version      2.6.1
 // @description  通常プレイで受信した状態データだけをローカル転送する受動Bridge。追加通信・自動操作なし
 // @match        *://*.kancolle-server.com/*
 // @include      *://203.104.209.*/*
@@ -13,10 +13,16 @@
 
 (() => {
   'use strict';
-  const VERSION='2.5.0';
+  const VERSION='2.6.1';
   const API_MSG='__KCS_SAFE25_API__';
   const SHOT_REQ='__KCS_SAFE25_SCREENSHOT_REQ__';
   const SHOT_RES='__KCS_SAFE25_SCREENSHOT_RES__';
+  function heartbeat(){try{window.top.postMessage({[API_MSG]:{path:'/kcsapi/__safe25_heartbeat__',captured_at:new Date().toISOString(),request:{},data:{version:VERSION}}},'*');}catch(_){}}
+  window.addEventListener('message',e=>{
+    if(!e?.data?.__KCS_SAFE25_HELLO__||e.source!==window.top)return;
+    try{if(!/(^|\.)dmm\.com$/i.test(new URL(e.origin).hostname))return;}catch(_){return;}
+    heartbeat();
+  });
   if(window.__KCS_SAFE25_BRIDGE__) return;
   window.__KCS_SAFE25_BRIDGE__=true;
 

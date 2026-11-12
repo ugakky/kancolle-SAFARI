@@ -28,7 +28,7 @@ assert.equal(fleetTotals(4).api_lv,70);
 ingestDecks([{api_id:3,api_ship:[999,-1]}]);assert.equal(fleetTotals(3).api_lv,null);
 ingestDecks([{api_id:2,api_ship:[-1,-1]}]);assert.equal(fleetTotals(2).api_lv,0);
 for(const bad of [null,NaN,Infinity,'10',-1]){ingestShips([{api_id:1,api_lv:bad}]);assert.equal(fleetTotals(1).api_lv,null);}
-S.sortieDeck=1;refreshFleets();S.hpAfter.set(1,{now:1,max:20});
+S.bridge=true;S.sortieDeck=1;refreshFleets();S.hpAfter.set(1,{now:1,max:20});
 const before=JSON.stringify(S.fleet1);fleetTotalsHtml();
 assert.equal(JSON.stringify(S.fleet1),before);assert.equal(guardState().block,true);
 const html=fleetTotalsHtml();for(let id=1;id<=4;id++)assert.ok(html.includes(`第${id}艦隊`));
