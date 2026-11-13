@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         艦これ Safari Safety v2.5
 // @namespace    https://github.com/ugakky/kancolle-SAFARI
-// @version      2.6.1
+// @version      2.6.2
 // @description  受動API表示・大破警告・ダメコン判定・画面端ブロッカー・艦これDB書き出し・ローカルスクショ
 // @match        *://*.dmm.com/*
 // @run-at       document-start
@@ -12,7 +12,7 @@
 
 (() => {
 'use strict';
-const VERSION='2.6.1';
+const VERSION='2.6.2';
 const API_MSG='__KCS_SAFE25_API__', SHOT_REQ='__KCS_SAFE25_SCREENSHOT_REQ__', SHOT_RES='__KCS_SAFE25_SCREENSHOT_RES__';
 const CFG_KEY='__KCS_SAFE25_CONFIG__';
 const DEFAULT_CFG={guardRight:0.58,guardTop:0.08,guardBottom:0.96,unlockTripleTap:true};
@@ -27,7 +27,6 @@ const hpArray=a=>Array.isArray(a)?((a[0]<0?a.slice(1):a).map(Number)):[];
 const deckIds=a=>arr(a).map(Number).filter(x=>x>0);
 const pathTail=p=>String(p||'').split('/').filter(Boolean).pop()||'';
 window.addEventListener('message',e=>{const d=e?.data?.[API_MSG];if(d){try{const h=new URL(e.origin).hostname;if(!/(^|\.)kancolle-server\.com$/i.test(h)&&!/^203\.104\.209\.\d+$/.test(h))return;}catch(_){return;}onApi(d);return;}const shot=e?.data?.[SHOT_RES];if(shot){const p=S.screenshotPending.get(String(shot.requestId||''));if(!p)return;S.screenshotPending.delete(String(shot.requestId));clearTimeout(p.timer);if(shot.error)p.reject(new Error(shot.error));else p.resolve(shot.blob);}});
-boot();
 function probeBridge(){for(const frame of document.querySelectorAll('iframe')){try{frame.contentWindow?.postMessage({__KCS_SAFE25_HELLO__:true},'*');}catch(_){}}}
 function onApi(d){const p=String(d.path||'');if(!p.startsWith('/kcsapi/'))return;S.bridge=true;if(p==='/kcsapi/__safe25_heartbeat__'){S.bridgeVersion=String(d.data?.version||'?');render();return;}S.apiCount++;S.lastApi=pathTail(p);S.latestRaw.set(p,d.data);S.capturedAt.set(p,d.captured_at||new Date().toISOString());if(p==='/kcsapi/__safe25_heartbeat__'){render();return;}try{if(p==='/kcsapi/api_start2/getData')ingestMaster(d.data);if(p==='/kcsapi/api_port/port')ingestPort(d.data);if(p.startsWith('/kcsapi/api_get_member/'))ingestMember(p,d.data);ingestStateFragments(d.data);if(p==='/kcsapi/api_req_map/start')startSortie(d);else if(p==='/kcsapi/api_req_map/next')mapNext(d.data);else if(isBattle(p))readBattle(p,d.data);else if(p.endsWith('/battleresult'))battleResult(p,d.data);else if(p.includes('/goback_port'))endChoice();if(p.endsWith('/base_air_corps')||p.startsWith('/kcsapi/api_req_air_corps/'))mergeBases(d.data);if(p.endsWith('/mapinfo'))mergeMapInfo(d.data);if(p.endsWith('/questlist'))mergeQuests(d.data);refreshFleets();render();}catch(err){S.uncertain=true;S.uncertainReason=`解析エラー: ${pathTail(p)}`;console.error('[KCS Safe25]',err);render();}}
 function ingestMaster(d){S.master.raw=d||{};S.master.ships.clear();S.master.slots.clear();for(const x of arr(d?.api_mst_ship))if(Number(x?.api_id)>0)S.master.ships.set(Number(x.api_id),x);for(const x of arr(d?.api_mst_slotitem))if(Number(x?.api_id)>0)S.master.slots.set(Number(x.api_id),x);}
@@ -113,4 +112,6 @@ function stamp(){const d=new Date(),p=n=>String(n).padStart(2,'0');return`${d.ge
 function downloadBlob(blob,name){const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=name;a.style.display='none';document.documentElement.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),30000);}
 function exportDb(){downloadBlob(new Blob([JSON.stringify(buildDb(),null,2)],{type:'application/json'}),`かんこれDB_${stamp()}.json`);}
 async function takeScreenshot(){const requestId=`${Date.now()}_${Math.random().toString(36).slice(2)}`,frame=[...document.querySelectorAll('iframe')].find(x=>/kancolle-server|203\.104\.209\./i.test(x.src||''));if(!frame?.contentWindow){alert('艦これゲームframeを確認できません');return;}try{const blob=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{S.screenshotPending.delete(requestId);reject(new Error('timeout'));},4000);S.screenshotPending.set(requestId,{resolve,reject,timer});frame.contentWindow.postMessage({[SHOT_REQ]:{requestId}},'*');});downloadBlob(blob,`かんこれSS_${stamp()}.png`);}catch(e){alert(`スクショ取得失敗: ${e.message}\nブラウザのCanvas保護により取得できない場合があります。`);}}
+// Start only after all lexical constants (including FLEET_STATS) are initialized.
+boot();
 })();

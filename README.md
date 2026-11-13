@@ -1,4 +1,11 @@
-# kancolle-SAFARI — Safety v2.6.1
+# kancolle-SAFARI — Safety v2.6.2
+
+## v2.6.2 空表示の修正
+
+ページ読み込みが進んだ状態で起動すると、FLEET_STATS初期化前に描画して例外で停止する不具合を再現・修正しました。
+起動呼び出しを全定数の初期化後へ移動。`node scripts/startup-test.mjs` は起動処理を省略せず、complete/interactive/loadingの3状態で起動・母港受信・画面描画を検証します。
+Safety本体をv2.6.2へ更新してください。Bridgeはv2.6.1のままで変更不要です。
+iPhone実機での動作・接続は未確認です。BridgeのSUB表示だけで実行失敗と判断しないでください。
 
 ## v2.6.1 接続診断
 
